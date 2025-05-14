@@ -288,6 +288,95 @@ def get_own_ip_addresses():
         # Return a default set of IPs
         return ['127.0.0.1', '::1']
 
+# Parse HTTP headers from raw data
+def parse_http_headers(data):
+    """
+    Parse HTTP headers from raw data.
+    Returns a tuple of (status_line, headers_dict, body, is_http)
+    """
+    try:
+        # Check if this is HTTP data
+        if not data.startswith(b'HTTP/') and not data.split(b'\r\n', 1)[0].startswith(b'GET ') and not data.split(b'\r\n', 1)[0].startswith(b'POST '):
+            return None, {}, data, False
+            
+        # Split headers and body
+        if b'\r\n\r\n' in data:
+            headers_raw, body = data.split(b'\r\n\r\n', 1)
+        else:
+            headers_raw, body = data, b''
+            
+        # Split into lines
+        header_lines = headers_raw.split(b'\r\n')
+        
+        # Get status line or request line
+        status_line = header_lines[0].decode('utf-8', errors='replace')
+        
+        # Parse headers
+        headers = {}
+        for line in header_lines[1:]:
+            if not line:
+                continue
+                
+            try:
+                key, value = line.split(b':', 1)
+                headers[key.decode('utf-8', errors='replace').strip().lower()] = value.decode('utf-8', errors='replace').strip()
+            except:
+                # Skip malformed headers
+                pass
+                
+        return status_line, headers, body, True
+    except Exception as e:
+        logging.getLogger("log").debug(f"Error parsing HTTP headers: {e}")
+        return None, {}, data, False
+
+# Extract important HTTP information for logging
+def get_http_info(data, is_response=False):
+    """
+    Extract important HTTP information for logging.
+    Returns a dictionary with key HTTP information.
+    """
+    status_line, headers, body, is_http = parse_http_headers(data)
+    
+    if not is_http:
+        return {"is_http": False, "data_size": len(data)}
+        
+    result = {
+        "is_http": True,
+        "data_size": len(data),
+        "body_size": len(body),
+        "headers": headers
+    }
+    
+    # Add status line or request line
+    if status_line:
+        result["status_line"] = status_line
+        
+    # For responses, extract status code and message
+    if is_response and status_line and status_line.startswith('HTTP/'):
+        try:
+            parts = status_line.split(' ', 2)
+            if len(parts) >= 2:
+                result["status_code"] = int(parts[1])
+            if len(parts) >= 3:
+                result["status_message"] = parts[2]
+        except:
+            pass
+            
+    # Extract important headers
+    if 'content-type' in headers:
+        result["content_type"] = headers['content-type']
+    if 'content-length' in headers:
+        try:
+            result["content_length"] = int(headers['content-length'])
+        except:
+            pass
+    if 'transfer-encoding' in headers:
+        result["transfer_encoding"] = headers['transfer-encoding']
+    if 'location' in headers:
+        result["location"] = headers['location']
+        
+    return result
+
 # Try to get server certificate with OpenSSL
 def get_cert_chain(dest_ip, dest_port, req_hostname):
     context = OpenSSL.SSL.Context(OpenSSL.SSL.SSLv23_METHOD)

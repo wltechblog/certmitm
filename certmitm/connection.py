@@ -124,9 +124,25 @@ class test_list(object):
         self.certpath = os.path.join(self.errorpath,self.connection.upstream_name,"certs")
 
     def log(self, timestamp, who, what):
-        txtfilename = os.path.join(self.mitmdatadir,f'{timestamp}.txt')
-        binfilename = os.path.join(self.mitmdatadir,f'{timestamp}.bin')
-        hexfilename = os.path.join(self.mitmdatadir,f'{timestamp}.hex')
+        # Special handling for HTTP info logs (which are JSON strings)
+        if who.endswith('_http_info') and isinstance(what, str):
+            # Create HTTP info log file
+            httpinfofilename = os.path.join(self.mitmdatadir, f'{timestamp}.httpinfo.json')
+            dirname = os.path.dirname(httpinfofilename)
+            
+            if not os.path.exists(dirname):
+                os.makedirs(dirname)
+                
+            # Write HTTP info as JSON
+            with open(httpinfofilename, 'a') as httpinfofile:
+                httpinfofile.write(f"{what}\n")
+            return
+            
+        # Regular binary data logging
+        txtfilename = os.path.join(self.mitmdatadir, f'{timestamp}.txt')
+        binfilename = os.path.join(self.mitmdatadir, f'{timestamp}.bin')
+        hexfilename = os.path.join(self.mitmdatadir, f'{timestamp}.hex')
+        httpfilename = os.path.join(self.mitmdatadir, f'{timestamp}.http')
         dirname = os.path.dirname(txtfilename)
         
         if not os.path.exists(dirname):
@@ -179,6 +195,45 @@ class test_list(object):
                 offset += 16
             
             hexmitmfile.write("\n")
+            
+        # Try to parse and format HTTP data if this might be HTTP
+        try:
+            # Check if this looks like HTTP data
+            if (what.startswith(b'HTTP/') or 
+                what.startswith(b'GET ') or 
+                what.startswith(b'POST ') or 
+                what.startswith(b'PUT ') or 
+                what.startswith(b'DELETE ')):
+                
+                # Format HTTP data for better readability
+                with open(httpfilename, 'a') as httpfile:
+                    httpfile.write(f"--- {who} at {time.time()} ({len(what)} bytes) ---\n")
+                    
+                    # Try to split headers and body
+                    if b'\r\n\r\n' in what:
+                        headers, body = what.split(b'\r\n\r\n', 1)
+                        
+                        # Write headers with line breaks
+                        header_lines = headers.split(b'\r\n')
+                        for line in header_lines:
+                            httpfile.write(f"{line.decode('utf-8', errors='replace')}\n")
+                        
+                        httpfile.write("\n")  # Empty line between headers and body
+                        
+                        # Try to decode body as text if possible
+                        try:
+                            body_str = body.decode('utf-8', errors='replace')
+                            httpfile.write(body_str)
+                        except:
+                            httpfile.write(f"[Binary body data, {len(body)} bytes]")
+                    else:
+                        # Just write the whole thing if we can't split it
+                        httpfile.write(what.decode('utf-8', errors='replace'))
+                    
+                    httpfile.write("\n\n")
+        except Exception as e:
+            # If HTTP parsing fails, just continue
+            pass
 
     def get_test(self):
         # If the tests have not yet been generated

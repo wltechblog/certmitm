@@ -203,6 +203,29 @@ def threaded_connection_handler(downstream_socket, listen_port):
                         if from_client and mitm_connection.downstream_tls:
                             # double check that we're not logging the TLS handshake
                             if not certmitm.util.SNIFromHello(from_client):
+                                # Extract HTTP information from the client request
+                                http_info = certmitm.util.get_http_info(from_client, is_response=False)
+                                
+                                # Log HTTP information if this is an HTTP request
+                                if http_info["is_http"]:
+                                    request_info = ""
+                                    if "status_line" in http_info:
+                                        request_info = f"Request: {http_info['status_line']}"
+                                    
+                                    content_info = ""
+                                    if "content_type" in http_info:
+                                        content_info = f"Content-Type: {http_info['content_type']}"
+                                    if "content_length" in http_info:
+                                        content_info += f", Length: {http_info['content_length']}"
+                                    elif "body_size" in http_info:
+                                        content_info += f", Body size: {http_info['body_size']}"
+                                    
+                                    # Log the HTTP request details
+                                    logger.info(f"Client request: {request_info} | {content_info}")
+                                    
+                                    # Add HTTP info to the log data
+                                    connection_tests.log(connection, 'client_http_info', json.dumps(http_info))
+                                
                                 if not mitm:
                                     if not logged_insecure:
                                         # Insecure connection! GG happy bounties, Lets log this and add the tests to successfull test list for future mitm
@@ -210,6 +233,13 @@ def threaded_connection_handler(downstream_socket, listen_port):
                                         connection_tests.add_successfull_test(connection, test)
                                         logged_insecure = True
                                         mitm_success = True
+                                        
+                                        # Log HTTP request details if available
+                                        if http_info["is_http"] and "status_line" in http_info:
+                                            logger.critical(f"HTTP Request: {http_info['status_line']}")
+                                            if "content_type" in http_info:
+                                                logger.critical(f"Content-Type: {http_info['content_type']}")
+                                    
                                     # Store client data separately and also in combined data
                                     insecure_data_client += from_client
                                     insecure_data += from_client
@@ -267,6 +297,31 @@ def threaded_connection_handler(downstream_socket, listen_port):
                             from_server = b''
                         logger.debug(f"server: {from_server}")
                         if from_server:
+                            # Extract HTTP information from the server response
+                            http_info = certmitm.util.get_http_info(from_server, is_response=True)
+                            
+                            # Log HTTP information if this is an HTTP response
+                            if http_info["is_http"]:
+                                status_info = ""
+                                if "status_code" in http_info:
+                                    status_info = f"Status: {http_info['status_code']}"
+                                    if "status_message" in http_info:
+                                        status_info += f" {http_info['status_message']}"
+                                
+                                content_info = ""
+                                if "content_type" in http_info:
+                                    content_info = f"Content-Type: {http_info['content_type']}"
+                                if "content_length" in http_info:
+                                    content_info += f", Length: {http_info['content_length']}"
+                                elif "body_size" in http_info:
+                                    content_info += f", Body size: {http_info['body_size']}"
+                                
+                                # Log the HTTP response details
+                                logger.info(f"Server response: {status_info} | {content_info}")
+                                
+                                # Add HTTP info to the log data
+                                connection_tests.log(connection, 'server_http_info', json.dumps(http_info))
+                            
                             # Always log server responses for analysis
                             connection_tests.log(connection, 'server', from_server)
                             
@@ -279,10 +334,20 @@ def threaded_connection_handler(downstream_socket, listen_port):
                                     
                                     # If this is a successful MITM, also log with a special tag
                                     if mitm_success:
+                                        logger.critical(f"MITM SUCCESS - Captured server response: {len(from_server)} bytes")
+                                        if http_info["is_http"] and "status_code" in http_info:
+                                            logger.critical(f"HTTP Status: {http_info.get('status_code')} {http_info.get('status_message', '')}")
+                                            if "content_type" in http_info:
+                                                logger.critical(f"Content-Type: {http_info['content_type']}")
                                         connection_tests.log(connection, 'server_mitm_success', from_server)
                                         
                             # Even if not TLS, if we've had a successful MITM, log the response
                             elif mitm_success:
+                                logger.critical(f"MITM SUCCESS - Captured server response: {len(from_server)} bytes")
+                                if http_info["is_http"] and "status_code" in http_info:
+                                    logger.critical(f"HTTP Status: {http_info.get('status_code')} {http_info.get('status_message', '')}")
+                                    if "content_type" in http_info:
+                                        logger.critical(f"Content-Type: {http_info['content_type']}")
                                 insecure_data_server += from_server
                                 connection_tests.log(connection, 'server_mitm_success', from_server)
                         if from_server == b'':
