@@ -1,0 +1,66 @@
+# certmitm Project Rules
+
+## Project Structure
+- Main script: certmitm.py (entry point)
+- Core modules in certmitm/ directory
+- Certificate storage in real_certs/ directory
+- Working directory specified by --workdir or created as temp directory
+
+## Code Patterns
+- Python 3.10+ syntax and features
+- OpenSSL for certificate operations
+- Socket operations for network handling
+- Threading for concurrent connections
+- Logging for status reporting
+
+## Testing Methodology
+1. Intercept client connections
+2. Extract original destination
+3. Generate test certificates
+4. Apply tests sequentially
+5. Monitor for successful attacks
+6. Log intercepted data
+7. Report results
+
+## Certificate Tests
+- self_signed: Self-signed certificates
+- replaced_key: Certificates with replaced public keys
+- real_cert_*: Valid certificates for different domains
+- real_cert_CA_*: Certificates signed by valid but unauthorized CAs
+
+## Network Configuration
+- Tool acts as network gateway
+- HTTPS traffic redirected to tool
+- DHCP/DNS provided for client devices
+- iptables used for traffic redirection
+
+## Command Line Options
+- -v/--verbose: Enable verbose logging
+- --debug: Enable debug logging
+- -w/--workdir: Set working directory
+- -l/--listen: Set listening port
+- -r/--retrytests: Set test retry count
+- -s/--show-data: Show intercepted data (truncated)
+- --show-data-all: Show all intercepted data
+- --instant-mitm: Forward data before tests complete
+- --skip-additional-tests: Use first successful test only
+
+## Real Certificate Requirements
+- Must be in PEM format
+- Must be placed in real_certs/ directory
+- Must follow naming pattern: name_cert.pem and name_key.pem
+- Can include multiple certificates from different issuers
+
+## Logging Conventions
+- CRITICAL: Successful attacks and intercepted data
+- INFO: Secure connections and test results
+- DEBUG: Detailed operation information
+- WARNING: Potential issues
+- ERROR: Operation failures
+
+## Development Practices
+- Comment planned features with #not yet implemented
+- Use descriptive variable and function names
+- Follow Python PEP 8 style guidelines
+- Maintain backward compatibility
+- Document new features and changes
