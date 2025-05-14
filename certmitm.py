@@ -211,10 +211,36 @@ def threaded_connection_handler(downstream_socket, listen_port):
             if 'connection' in locals() and 'test' in locals() and test:
                 # Log insecure data
                 if insecure_data:
-                    if args.show_data_all:
-                        logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} intercepted data = '{insecure_data}'")
-                    elif args.show_data:
-                        logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} intercepted data = '{insecure_data[:2048]}'")
+                    # Format the data for better display
+                    try:
+                        # Try to decode as UTF-8 if possible
+                        data_str = insecure_data.decode('utf-8', errors='replace')
+                        
+                        # Clean up control characters for better display
+                        data_str = ''.join(c if c.isprintable() or c in '\n\r\t' else f'\\x{ord(c):02x}' for c in data_str)
+                        
+                        # Add a header to show data size
+                        data_size = len(insecure_data)
+                        header = f"[Intercepted {data_size} bytes] "
+                        
+                        if args.show_data_all:
+                            logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = {header}{data_str}")
+                        elif args.show_data:
+                            # Truncate but show how much was truncated
+                            truncated_data = data_str[:4096]
+                            if len(data_str) > 4096:
+                                truncated_data += f"\n[...truncated, {len(data_str) - 4096} more bytes...]"
+                            logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = {header}{truncated_data}")
+                    except Exception as e:
+                        # Fallback to hex representation if decoding fails
+                        logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = [Binary data, {len(insecure_data)} bytes]")
+                        if args.show_data_all or args.show_data:
+                            # Show hex dump of first 1024 bytes
+                            hex_dump = ' '.join(f'{b:02x}' for b in insecure_data[:1024])
+                            if len(insecure_data) > 1024:
+                                hex_dump += f" ... [{len(insecure_data) - 1024} more bytes]"
+                            logger.critical(f"Hex dump: {hex_dump}")
+                
                 # Log secure connections
                 elif mitm_connection and mitm_connection.downstream_tls and not mitm:
                     logger.info(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = Nothing received")

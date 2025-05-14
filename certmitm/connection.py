@@ -126,14 +126,59 @@ class test_list(object):
     def log(self, timestamp, who, what):
         txtfilename = os.path.join(self.mitmdatadir,f'{timestamp}.txt')
         binfilename = os.path.join(self.mitmdatadir,f'{timestamp}.bin')
+        hexfilename = os.path.join(self.mitmdatadir,f'{timestamp}.hex')
         dirname = os.path.dirname(txtfilename)
+        
         if not os.path.exists(dirname):
             os.makedirs(dirname)
+            
+        # Write binary data as-is to binary file
+        with open(binfilename, 'ab') as binmitmfile:
+            binmitmfile.write(what)
+        
+        # Create a better text representation for the text log
+        try:
+            # Try to decode as UTF-8 if possible
+            data_str = what.decode('utf-8', errors='replace')
+            # Clean up control characters for better display
+            data_str = ''.join(c if c.isprintable() or c in '\n\r\t' else f'\\x{ord(c):02x}' for c in data_str)
+        except:
+            # If decoding fails, use a placeholder
+            data_str = f"[Binary data, {len(what)} bytes]"
+        
+        # Write JSON log with proper metadata
         with open(txtfilename, 'a') as txtmitmfile:
-            with open(binfilename, 'ab') as binmitmfile:
-                jsondata = json.dumps({"timestamp":str(time.time()), "from":str(who), "data":str(what)})
-                txtmitmfile.write(f'{jsondata}\n')
-                binmitmfile.write(what)
+            log_entry = {
+                "timestamp": str(time.time()),
+                "from": str(who),
+                "size": len(what),
+                "data": data_str
+            }
+            jsondata = json.dumps(log_entry)
+            txtmitmfile.write(f'{jsondata}\n')
+        
+        # Write hex dump for binary analysis
+        with open(hexfilename, 'a') as hexmitmfile:
+            hexmitmfile.write(f"--- {who} at {time.time()} ({len(what)} bytes) ---\n")
+            
+            # Create a hex dump with both hex and ASCII representation
+            offset = 0
+            while offset < len(what):
+                # Get 16 bytes for this line
+                chunk = what[offset:offset+16]
+                
+                # Format as hex
+                hex_line = ' '.join(f'{b:02x}' for b in chunk)
+                hex_line = hex_line.ljust(49)  # Pad to consistent width
+                
+                # Format as ASCII (printable chars only)
+                ascii_line = ''.join(chr(b) if 32 <= b <= 126 else '.' for b in chunk)
+                
+                # Write the line with offset
+                hexmitmfile.write(f"{offset:08x}:  {hex_line}  |{ascii_line}|\n")
+                offset += 16
+            
+            hexmitmfile.write("\n")
 
     def get_test(self):
         # If the tests have not yet been generated
