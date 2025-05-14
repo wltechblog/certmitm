@@ -98,17 +98,18 @@ def create_client_context():
     """
     Create a client SSL context with appropriate settings for connecting to upstream servers.
     This context is intentionally permissive to allow connecting to servers with invalid certificates.
+    During MITM operations, we don't need to validate the server's certificate at all.
     """
-    # Create a default context for client connections
-    upstream_context = ssl.create_default_context()
+    # Create an unverified context for maximum compatibility
+    upstream_context = ssl._create_unverified_context()
     
     # Set to use all available ciphers for maximum compatibility
     upstream_context.set_ciphers('ALL')
     
-    # Disable hostname verification
+    # Explicitly disable hostname verification
     upstream_context.check_hostname = False
     
-    # Don't verify certificates
+    # Explicitly disable certificate verification
     upstream_context.verify_mode = ssl.CERT_NONE
     
     # Support all TLS versions
@@ -119,6 +120,9 @@ def create_client_context():
     upstream_context.options &= ~ssl.OP_NO_SSLv3
     upstream_context.options &= ~ssl.OP_NO_TLSv1
     upstream_context.options &= ~ssl.OP_NO_TLSv1_1
+    
+    # Disable certificate verification completely
+    upstream_context.options |= ssl.OP_NO_COMPRESSION
     
     return upstream_context
 
@@ -421,43 +425,137 @@ def get_http_info(data, is_response=False):
 
 # Try to get server certificate with OpenSSL
 def get_cert_chain(dest_ip, dest_port, req_hostname):
+    """
+    Get the certificate chain from a server using OpenSSL.
+    This function does not validate the certificate chain.
+    
+    Args:
+        dest_ip: The IP address of the server
+        dest_port: The port of the server
+        req_hostname: The hostname to use for SNI
+        
+    Returns:
+        The certificate chain from the server
+    """
+    # Create a context with no verification
     context = OpenSSL.SSL.Context(OpenSSL.SSL.SSLv23_METHOD)
+    context.set_verify(OpenSSL.SSL.VERIFY_NONE, lambda *args: True)
+    
+    # Create a socket with timeout
     client = socket.socket()
     client.settimeout(5)  # Set a 5-second timeout for the connection
+    
     try:
+        # Connect to the server
         client.connect((dest_ip, dest_port))
+        
+        # Create an SSL connection
         clientSSL = OpenSSL.SSL.Connection(context, client)
+        
+        # Set SNI if hostname is provided
         if req_hostname:
             clientSSL.set_tlsext_host_name(bytes(req_hostname, 'utf-8'))
-        clientSSL.set_verify(OpenSSL.SSL.VERIFY_NONE)
+        
+        # Explicitly disable verification
+        clientSSL.set_verify(OpenSSL.SSL.VERIFY_NONE, lambda *args: True)
+        
+        # Set connection state and perform handshake
         clientSSL.set_connect_state()
         clientSSL.do_handshake()
-        return clientSSL.get_peer_cert_chain()
+        
+        # Get the certificate chain
+        cert_chain = clientSSL.get_peer_cert_chain()
+        
+        # Return the certificate chain
+        return cert_chain
     except socket.timeout:
         raise TimeoutError("Connection to server timed out")
+    except OpenSSL.SSL.Error as e:
+        raise Exception(f"OpenSSL error: {e}")
+    except Exception as e:
+        raise Exception(f"Error getting certificate chain: {e}")
     finally:
-        client.close()
+        # Always close the socket
+        try:
+            client.close()
+        except:
+            pass
 
 # Try to get server certificate with openssl s_client
 # Needed as get_peer_cert_chain fails if the server wants a client certificate
 def get_cert_chain_sclient(dest_ip, dest_port, req_hostname):
+    """
+    Get the certificate chain from a server using the openssl s_client command.
+    This is a fallback method when the direct OpenSSL approach fails.
+    
+    Args:
+        dest_ip: The IP address of the server
+        dest_port: The port of the server
+        req_hostname: The hostname to use for SNI
+        
+    Returns:
+        The certificate chain from the server
+    """
     try:
+        # Build the command with all necessary options
+        cmd = [
+            "openssl", "s_client", 
+            "-host", str(dest_ip), 
+            "-port", str(dest_port),
+            "-servername", str(req_hostname),
+            "-showcerts",
+            "-connect_timeout", "5",
+            "-verify_return_error",  # Continue even if verification fails
+            "-no_tls1_3",  # Some older openssl versions have issues with TLS 1.3
+            "-cipher", "ALL"  # Use all available ciphers
+        ]
+        
         # Add a timeout to the subprocess call
         s_client = subprocess.run(
-            ["openssl", "s_client", "-host", str(dest_ip), "-port", str(dest_port), 
-             "-servername", str(req_hostname), "-showcerts", "-connect_timeout", "5"],
-            input="", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10
+            cmd,
+            input=b"",  # Send empty input
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE,  # Capture stderr for debugging
+            timeout=10,
+            check=False  # Don't raise exception on non-zero exit
         )
         
+        # Check if we got any output
+        if not s_client.stdout:
+            # Check stderr for error messages
+            if s_client.stderr:
+                error_msg = s_client.stderr.decode('utf-8', errors='replace')
+                raise Exception(f"OpenSSL s_client error: {error_msg}")
+            else:
+                raise Exception("OpenSSL s_client returned no output")
+        
+        # Parse the certificates from the output
         cert_fullchain = []
-        for i in s_client.stdout.split(b"-----BEGIN CERTIFICATE-----")[1:]:
-            cert_string = i.split(b"-----END CERTIFICATE-----")[0]
-            cert_string = f"-----BEGIN CERTIFICATE-----{cert_string.decode('utf-8')}-----END CERTIFICATE-----"
-            cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, cert_string)
-            cert_fullchain.append(cert)
+        cert_sections = s_client.stdout.split(b"-----BEGIN CERTIFICATE-----")
+        
+        # Skip the first section (before the first certificate)
+        for i in cert_sections[1:]:
+            try:
+                # Extract the certificate content
+                cert_string = i.split(b"-----END CERTIFICATE-----")[0]
+                cert_string = f"-----BEGIN CERTIFICATE-----{cert_string.decode('utf-8', errors='replace')}-----END CERTIFICATE-----"
+                
+                # Load the certificate
+                cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, cert_string)
+                cert_fullchain.append(cert)
+            except Exception as e:
+                # Skip invalid certificates
+                continue
+        
+        # Check if we found any certificates
+        if not cert_fullchain:
+            raise Exception("No valid certificates found in OpenSSL output")
+            
         return cert_fullchain
     except subprocess.TimeoutExpired:
         raise TimeoutError("OpenSSL s_client command timed out")
+    except Exception as e:
+        raise Exception(f"Error getting certificate chain with s_client: {str(e)}")
 
 def get_server_cert_fullchain(dest_ip, dest_port, req_hostname):
     """

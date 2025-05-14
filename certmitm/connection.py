@@ -430,13 +430,16 @@ class mitm_connection(object):
             return False
             
         try:
-            # Create a client context with appropriate settings
+            # Create a client context with appropriate settings - completely unverified
             self.upstream_context = certmitm.util.create_client_context()
             
-            # Wrap the socket with TLS
+            # Log that we're connecting without certificate validation
+            self.logger.debug(f"Connecting to upstream server without certificate validation")
+            
+            # Wrap the socket with TLS - using SNI but not validating the certificate
             self.upstream_socket = self.upstream_context.wrap_socket(
                 self.upstream_socket, 
-                server_hostname=hostname,
+                server_hostname=hostname,  # Send SNI but don't validate against it
                 do_handshake_on_connect=True
             )
             
@@ -446,18 +449,50 @@ class mitm_connection(object):
             # Mark as TLS-wrapped
             self.upstream_tls = True
             
+            # Log successful connection
+            cipher = self.upstream_socket.cipher()
+            if cipher:
+                self.logger.debug(f"TLS connection established with cipher: {cipher[0]}")
+            
             self.logger.debug(f"Successfully wrapped upstream with TLS (SNI: {hostname})")
             return True
         except ssl.SSLError as e:
             self.logger.error(f"SSL error wrapping upstream with TLS: {e}")
-            # Close the socket on error
-            if self.upstream_socket:
-                try:
-                    self.upstream_socket.close()
-                except:
-                    pass
-                self.upstream_socket = None
-            return False
+            
+            # Try one more time with a completely unverified context
+            try:
+                self.logger.debug("Retrying with completely unverified context")
+                # Create a raw context with no verification at all
+                raw_context = ssl.SSLContext(ssl.PROTOCOL_TLS)
+                raw_context.check_hostname = False
+                raw_context.verify_mode = ssl.CERT_NONE
+                raw_context.set_ciphers('ALL')
+                
+                # Wrap the socket
+                self.upstream_socket = raw_context.wrap_socket(
+                    self.upstream_socket,
+                    server_hostname=hostname,
+                    do_handshake_on_connect=True
+                )
+                
+                # Set a timeout for TLS operations
+                self.upstream_socket.settimeout(10)
+                
+                # Mark as TLS-wrapped
+                self.upstream_tls = True
+                
+                self.logger.debug(f"Successfully wrapped upstream with fallback TLS method")
+                return True
+            except Exception as retry_error:
+                self.logger.error(f"Retry also failed: {retry_error}")
+                # Close the socket on error
+                if self.upstream_socket:
+                    try:
+                        self.upstream_socket.close()
+                    except:
+                        pass
+                    self.upstream_socket = None
+                return False
         except Exception as e:
             self.logger.error(f"Error wrapping upstream with TLS: {e}")
             # Close the socket on error
