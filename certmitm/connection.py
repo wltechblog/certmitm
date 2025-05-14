@@ -113,15 +113,27 @@ class test_list(object):
                 if not self.test_list:
                     # Get upstream fullchain from the server
                     self.logger.debug(f"New connection to {self.connection.upstream_str}")
-                    self.upstream_cert_fullchain = certmitm.util.get_server_cert_fullchain(self.connection.upstream_ip, self.connection.upstream_port, self.connection.upstream_sni)
-                    self.logger.debug(f"{self.connection.upstream_str} fullchain: '{self.upstream_cert_fullchain}'")
+                    try:
+                        self.upstream_cert_fullchain = certmitm.util.get_server_cert_fullchain(self.connection.upstream_ip, self.connection.upstream_port, self.connection.upstream_sni)
+                        self.logger.debug(f"{self.connection.upstream_str} fullchain: '{self.upstream_cert_fullchain}'")
+                    except Exception as e:
+                        self.logger.warning(f"Error getting certificate chain: {str(e)}")
+                        self.upstream_cert_fullchain = None
+                        
                     # Initialize test list
                     self.test_list = []
-                    # Generate list of tests for the 
-                    for test in certmitm.certtest.generate_test_context(self.upstream_cert_fullchain, self.connection.upstream_sni or self.connection.upstream_ip, self.working_dir, self.logger):
-                        for i in range(int(self.retrytests)):
-                            self.test_list.append(test)
-                    self.logger.debug(f"Generated tests: '{self.test_list}' to {self.connection.upstream_str}")
+                    
+                    # Generate list of tests for the connection
+                    # Even if we couldn't get a certificate chain, we'll generate tests with a self-signed cert
+                    try:
+                        for test in certmitm.certtest.generate_test_context(self.upstream_cert_fullchain, self.connection.upstream_sni or self.connection.upstream_ip, self.working_dir, self.logger):
+                            for i in range(int(self.retrytests)):
+                                self.test_list.append(test)
+                        self.logger.debug(f"Generated {len(self.test_list)} tests for {self.connection.upstream_str}")
+                    except Exception as e:
+                        self.logger.error(f"Failed to generate tests: {str(e)}")
+                        # Make sure we have an empty list at minimum
+                        self.test_list = []
 
         # Pop next test if were are not skipping tests
         if not (self.successfull_test_list != [] and self.skiptests):
