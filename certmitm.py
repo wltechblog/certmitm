@@ -325,13 +325,13 @@ def threaded_connection_handler(downstream_socket, listen_port):
                             # Always log server responses for analysis
                             connection_tests.log(connection, 'server', from_server)
                             
+                            # Always store server data when it's available
+                            insecure_data_server += from_server
+                            insecure_data += from_server
+                            
                             # If we have a TLS connection to the server
                             if mitm_connection.upstream_tls:
                                 if not mitm:
-                                    # Store server data separately and also in combined data
-                                    insecure_data_server += from_server
-                                    insecure_data += from_server
-                                    
                                     # If this is a successful MITM, also log with a special tag
                                     if mitm_success:
                                         logger.critical(f"MITM SUCCESS - Captured server response: {len(from_server)} bytes")
@@ -348,7 +348,6 @@ def threaded_connection_handler(downstream_socket, listen_port):
                                     logger.critical(f"HTTP Status: {http_info.get('status_code')} {http_info.get('status_message', '')}")
                                     if "content_type" in http_info:
                                         logger.critical(f"Content-Type: {http_info['content_type']}")
-                                insecure_data_server += from_server
                                 connection_tests.log(connection, 'server_mitm_success', from_server)
                         if from_server == b'':
                             if mitm or args.instant_mitm:
