@@ -106,8 +106,11 @@ def threaded_connection_handler(downstream_socket, listen_port):
 
         from_client = None
         from_server = None
-        insecure_data = b""
+        insecure_data_client = b""  # Data from client
+        insecure_data_server = b""  # Data from server
+        insecure_data = b""         # Combined data (for backward compatibility)
         logged_insecure = False
+        mitm_success = False        # Flag to track successful MITM
 
         if test:
             mitm = test.mitm
@@ -181,7 +184,20 @@ def threaded_connection_handler(downstream_socket, listen_port):
                                         logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = data intercepted!")
                                         connection_tests.add_successfull_test(connection, test)
                                         logged_insecure = True
+                                        mitm_success = True
+                                    # Store client data separately and also in combined data
+                                    insecure_data_client += from_client
                                     insecure_data += from_client
+                                
+                                # Always log client data for successful tests
+                                connection_tests.log(connection, 'client', from_client)
+                                
+                                # If this is a successful MITM, also log with a special tag
+                                if mitm_success:
+                                    connection_tests.log(connection, 'client_mitm_success', from_client)
+                                    
+                            elif mitm:
+                                # If we're in MITM mode, log the data even if it's part of the handshake
                                 connection_tests.log(connection, 'client', from_client)
 
                         if from_client and not mitm and not args.instant_mitm: 
@@ -225,10 +241,25 @@ def threaded_connection_handler(downstream_socket, listen_port):
                             count = 1
                             from_server = b''
                         logger.debug(f"server: {from_server}")
-                        if from_server and mitm_connection.upstream_tls:
-                            if not mitm:
-                                insecure_data += from_server
+                        if from_server:
+                            # Always log server responses for analysis
                             connection_tests.log(connection, 'server', from_server)
+                            
+                            # If we have a TLS connection to the server
+                            if mitm_connection.upstream_tls:
+                                if not mitm:
+                                    # Store server data separately and also in combined data
+                                    insecure_data_server += from_server
+                                    insecure_data += from_server
+                                    
+                                    # If this is a successful MITM, also log with a special tag
+                                    if mitm_success:
+                                        connection_tests.log(connection, 'server_mitm_success', from_server)
+                                        
+                            # Even if not TLS, if we've had a successful MITM, log the response
+                            elif mitm_success:
+                                insecure_data_server += from_server
+                                connection_tests.log(connection, 'server_mitm_success', from_server)
                         if from_server == b'':
                             if mitm or args.instant_mitm:
                                 break
@@ -260,43 +291,73 @@ def threaded_connection_handler(downstream_socket, listen_port):
             # Only proceed with logging if we have a valid connection and test
             if 'connection' in locals() and 'test' in locals() and test:
                 # Log insecure data
-                if insecure_data:
-                    # Format the data for better display
-                    try:
-                        # Try to decode as UTF-8 if possible
-                        data_str = insecure_data.decode('utf-8', errors='replace')
-                        
-                        # Clean up control characters for better display
-                        data_str = ''.join(c if c.isprintable() or c in '\n\r\t' else f'\\x{ord(c):02x}' for c in data_str)
-                        
-                        # Add a header to show data size
-                        data_size = len(insecure_data)
-                        header = f"[Intercepted {data_size} bytes] "
-                        
-                        if args.show_data_all:
-                            logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = {header}{data_str}")
-                        elif args.show_data:
-                            # For console output, we'll still truncate very large data
-                            # but we'll make sure to indicate this clearly
-                            max_console_output = 8192  # Increased from 4096 to 8192
+                if insecure_data or insecure_data_client or insecure_data_server:
+                    # Log summary of what was captured
+                    client_size = len(insecure_data_client)
+                    server_size = len(insecure_data_server)
+                    total_size = len(insecure_data)
+                    
+                    if mitm_success:
+                        logger.critical(f"MITM SUCCESS - {connection.client_ip}: {connection.upstream_str} for test {test.name}")
+                        logger.critical(f"Captured: Client: {client_size} bytes, Server: {server_size} bytes, Total: {total_size} bytes")
+                        logger.critical(f"Data saved to: {connection.client_ip}/{connection.upstream_name}/data/{connection.timestamp}.*")
+                    
+                    # Format the data for display if requested
+                    if args.show_data or args.show_data_all:
+                        try:
+                            # Process client data if available
+                            if insecure_data_client:
+                                client_str = insecure_data_client.decode('utf-8', errors='replace')
+                                client_str = ''.join(c if c.isprintable() or c in '\n\r\t' else f'\\x{ord(c):02x}' for c in client_str)
+                                
+                                # Add a header to show data size
+                                client_header = f"[Client data: {client_size} bytes] "
+                                
+                                # Determine how much to show
+                                max_console_output = 8192 if args.show_data else float('inf')  # No limit for show_data_all
+                                
+                                if len(client_str) > max_console_output and not args.show_data_all:
+                                    truncated_data = client_str[:max_console_output]
+                                    truncated_data += f"\n[...truncated, {len(client_str) - max_console_output} more bytes...]"
+                                    logger.critical(f"CLIENT REQUEST: {client_header}\n{truncated_data}")
+                                else:
+                                    logger.critical(f"CLIENT REQUEST: {client_header}\n{client_str}")
                             
-                            if len(data_str) > max_console_output:
-                                truncated_data = data_str[:max_console_output]
-                                truncated_data += f"\n[...truncated, {len(data_str) - max_console_output} more bytes...]"
-                                logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = {header}{truncated_data}")
-                                logger.critical(f"Full data saved to file in {connection.client_ip}/{connection.upstream_name}/data/{connection.timestamp}.*")
-                            else:
-                                # Show all data if it's under the limit
-                                logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = {header}{data_str}")
-                    except Exception as e:
-                        # Fallback to hex representation if decoding fails
-                        logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = [Binary data, {len(insecure_data)} bytes]")
-                        if args.show_data_all or args.show_data:
-                            # Show hex dump of first 1024 bytes
-                            hex_dump = ' '.join(f'{b:02x}' for b in insecure_data[:1024])
-                            if len(insecure_data) > 1024:
-                                hex_dump += f" ... [{len(insecure_data) - 1024} more bytes]"
-                            logger.critical(f"Hex dump: {hex_dump}")
+                            # Process server data if available
+                            if insecure_data_server:
+                                server_str = insecure_data_server.decode('utf-8', errors='replace')
+                                server_str = ''.join(c if c.isprintable() or c in '\n\r\t' else f'\\x{ord(c):02x}' for c in server_str)
+                                
+                                # Add a header to show data size
+                                server_header = f"[Server data: {server_size} bytes] "
+                                
+                                # Determine how much to show
+                                max_console_output = 8192 if args.show_data else float('inf')  # No limit for show_data_all
+                                
+                                if len(server_str) > max_console_output and not args.show_data_all:
+                                    truncated_data = server_str[:max_console_output]
+                                    truncated_data += f"\n[...truncated, {len(server_str) - max_console_output} more bytes...]"
+                                    logger.critical(f"SERVER RESPONSE: {server_header}\n{truncated_data}")
+                                else:
+                                    logger.critical(f"SERVER RESPONSE: {server_header}\n{server_str}")
+                                    
+                        except Exception as e:
+                            # Fallback to hex representation if decoding fails
+                            logger.critical(f"Binary data captured - Client: {client_size} bytes, Server: {server_size} bytes")
+                            
+                            # Show hex dump of client data
+                            if insecure_data_client and (args.show_data_all or args.show_data):
+                                hex_dump = ' '.join(f'{b:02x}' for b in insecure_data_client[:1024])
+                                if len(insecure_data_client) > 1024:
+                                    hex_dump += f" ... [{len(insecure_data_client) - 1024} more bytes]"
+                                logger.critical(f"Client hex dump: {hex_dump}")
+                            
+                            # Show hex dump of server data
+                            if insecure_data_server and (args.show_data_all or args.show_data):
+                                hex_dump = ' '.join(f'{b:02x}' for b in insecure_data_server[:1024])
+                                if len(insecure_data_server) > 1024:
+                                    hex_dump += f" ... [{len(insecure_data_server) - 1024} more bytes]"
+                                logger.critical(f"Server hex dump: {hex_dump}")
                 
                 # Log secure connections
                 elif mitm_connection and mitm_connection.downstream_tls and not mitm:
