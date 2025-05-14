@@ -173,7 +173,8 @@ def threaded_connection_handler(downstream_socket, listen_port):
                     if ready_socket == mitm_connection.downstream_socket:
                         # Lets read data from the client
                         try:
-                            # Read the initial chunk
+                            # Read the initial chunk with a timeout
+                            mitm_connection.downstream_socket.settimeout(5)
                             from_client = mitm_connection.downstream_socket.recv(4096)
                             
                             # If we have data and there might be more
@@ -198,12 +199,20 @@ def threaded_connection_handler(downstream_socket, listen_port):
                                     # Set socket back to blocking mode
                                     mitm_connection.downstream_socket.setblocking(True)
                                     
-                            logger.debug(f"Read {len(from_client)} bytes from client")
-                        except TimeoutError:
+                            # Log the data received
+                            if from_client:
+                                logger.debug(f"Read {len(from_client)} bytes from client")
+                            else:
+                                logger.debug("No data received from client")
+                                
+                        except (TimeoutError, ConnectionResetError, BrokenPipeError, ssl.SSLError) as e:
+                            logger.warning(f"Error reading from client: {e}")
                             count = 5
                             break
-                        logger.debug(f"client: {from_client}")
+                            
+                        # Check if we received any data
                         if from_client == b'':
+                            logger.debug("Empty data received from client, closing connection")
                             count = 5
                             break
                         if from_client and mitm_connection.downstream_tls:
@@ -267,15 +276,32 @@ def threaded_connection_handler(downstream_socket, listen_port):
                         else:
                             if mitm_connection.upstream_socket and from_client and len(from_client) > 0:
                                 try:
-                                    logger.debug(f"sending {len(from_client)} bytes to server")
-                                    mitm_connection.upstream_socket.send(from_client)
-                                except (BrokenPipeError, ConnectionResetError) as e:
+                                    # Set a timeout for the send operation
+                                    mitm_connection.upstream_socket.settimeout(5)
+                                    
+                                    # Log before sending
+                                    logger.debug(f"Sending {len(from_client)} bytes to server")
+                                    
+                                    # Send the data
+                                    bytes_sent = mitm_connection.upstream_socket.send(from_client)
+                                    
+                                    # Verify all data was sent
+                                    if bytes_sent < len(from_client):
+                                        logger.warning(f"Only sent {bytes_sent} of {len(from_client)} bytes to server")
+                                    else:
+                                        logger.debug(f"Successfully sent {bytes_sent} bytes to server")
+                                        
+                                except (BrokenPipeError, ConnectionResetError, TimeoutError, ssl.SSLError) as e:
                                     logger.warning(f"Failed to send data to server: {e}")
+                                    # Close the connection on error
                                     break
                         count = 0
                     elif ready_socket == mitm_connection.upstream_socket:
                         # Lets read data from the server
                         try:
+                            # Set a timeout for the read operation
+                            mitm_connection.upstream_socket.settimeout(5)
+                            
                             # Read the initial chunk
                             from_server = mitm_connection.upstream_socket.recv(4096)
                             
@@ -300,12 +326,23 @@ def threaded_connection_handler(downstream_socket, listen_port):
                                 finally:
                                     # Set socket back to blocking mode
                                     mitm_connection.upstream_socket.setblocking(True)
-                                    
-                            logger.debug(f"Read {len(from_server)} bytes from server")
-                        except TimeoutError:
+                            
+                            # Log the data received
+                            if from_server:
+                                logger.debug(f"Read {len(from_server)} bytes from server")
+                            else:
+                                logger.debug("No data received from server")
+                                
+                        except (TimeoutError, ConnectionResetError, BrokenPipeError, ssl.SSLError) as e:
+                            logger.warning(f"Error reading from server: {e}")
                             count = 1
                             from_server = b''
-                        logger.debug(f"server: {from_server}")
+                            
+                        # Log the data for debugging
+                        if from_server:
+                            logger.debug(f"Server data: first 100 bytes: {from_server[:100]}")
+                        else:
+                            logger.debug("Empty data received from server")
                         if from_server:
                             # Extract HTTP information from the server response
                             http_info = certmitm.util.get_http_info(from_server, is_response=True)
@@ -359,10 +396,24 @@ def threaded_connection_handler(downstream_socket, listen_port):
                         # Only send data to client if we have valid data
                         if from_server and len(from_server) > 0:
                             try:
-                                logger.debug(f"sending {len(from_server)} bytes to client")
-                                mitm_connection.downstream_socket.send(from_server)
-                            except (BrokenPipeError, ConnectionResetError) as e:
+                                # Set a timeout for the send operation
+                                mitm_connection.downstream_socket.settimeout(5)
+                                
+                                # Log before sending
+                                logger.debug(f"Sending {len(from_server)} bytes to client")
+                                
+                                # Send the data
+                                bytes_sent = mitm_connection.downstream_socket.send(from_server)
+                                
+                                # Verify all data was sent
+                                if bytes_sent < len(from_server):
+                                    logger.warning(f"Only sent {bytes_sent} of {len(from_server)} bytes to client")
+                                else:
+                                    logger.debug(f"Successfully sent {bytes_sent} bytes to client")
+                                    
+                            except (BrokenPipeError, ConnectionResetError, TimeoutError, ssl.SSLError) as e:
                                 logger.warning(f"Failed to send data to client: {e}")
+                                # Close the connection on error
                                 break
                     else:
                         # We should never arrive here
@@ -390,6 +441,24 @@ def threaded_connection_handler(downstream_socket, listen_port):
             logger.exception(e)
         finally:
             logger.debug("Connection handling complete, cleaning up")
+            
+            # Clean up sockets
+            if 'mitm_connection' in locals() and mitm_connection:
+                # Close downstream socket
+                if hasattr(mitm_connection, 'downstream_socket') and mitm_connection.downstream_socket:
+                    try:
+                        logger.debug("Closing downstream socket")
+                        mitm_connection.downstream_socket.close()
+                    except Exception as e:
+                        logger.debug(f"Error closing downstream socket: {e}")
+                
+                # Close upstream socket
+                if hasattr(mitm_connection, 'upstream_socket') and mitm_connection.upstream_socket:
+                    try:
+                        logger.debug("Closing upstream socket")
+                        mitm_connection.upstream_socket.close()
+                    except Exception as e:
+                        logger.debug(f"Error closing upstream socket: {e}")
             
             # Only proceed with logging if we have a valid connection and test
             if 'connection' in locals() and 'test' in locals() and test:

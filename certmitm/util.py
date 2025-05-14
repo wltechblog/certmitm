@@ -7,6 +7,7 @@ import subprocess
 import logging
 import dpkt
 import random
+import time
 from cryptography.hazmat.primitives import serialization
 
 def SNIFromHello(data):
@@ -418,7 +419,10 @@ def get_cert_chain_sclient(dest_ip, dest_port, req_hostname):
         raise TimeoutError("OpenSSL s_client command timed out")
 
 def get_server_cert_fullchain(dest_ip, dest_port, req_hostname):
-    fullchain = []
+    """
+    Attempt to retrieve the certificate chain from a server.
+    Returns a list of PEM-encoded certificates or None if retrieval fails.
+    """
     # Create a logger for this function
     logger = logging.getLogger("log")
     
@@ -427,36 +431,31 @@ def get_server_cert_fullchain(dest_ip, dest_port, req_hostname):
     
     logger.log(verbose_level, f"Attempting to get certificate chain for {dest_ip}:{dest_port} (SNI: {req_hostname})")
     
-    # Set a maximum timeout for the entire operation
-    max_time = 5  # seconds
-    start_time = time.time()
+    # Initialize variables
+    fullchain = []
     certificate_chain = None
     
-    # Try direct OpenSSL connection first
-    if time.time() - start_time < max_time:
-        try:
-            logger.debug("Trying direct OpenSSL connection...")
-            certificate_chain = get_cert_chain(dest_ip, dest_port, req_hostname)
+    # First method: Try direct OpenSSL connection
+    try:
+        logger.debug("Trying direct OpenSSL connection...")
+        certificate_chain = get_cert_chain(dest_ip, dest_port, req_hostname)
+        if certificate_chain:
             logger.log(verbose_level, "Successfully retrieved certificate chain via direct OpenSSL")
-        except (OpenSSL.SSL.Error, OSError, ConnectionRefusedError, TimeoutError) as e:
-            logger.debug(f"Direct OpenSSL connection failed: {str(e)}")
-            certificate_chain = None
+    except Exception as e:
+        logger.debug(f"Direct OpenSSL connection failed: {str(e)}")
+        certificate_chain = None
     
-    # If that fails, try openssl s_client command
-    if certificate_chain is None and time.time() - start_time < max_time:
+    # Second method: If first method failed, try openssl s_client command
+    if not certificate_chain:
         try:
             logger.debug("Trying openssl s_client command...")
             certificate_chain = get_cert_chain_sclient(dest_ip, dest_port, req_hostname)
-            logger.log(verbose_level, "Successfully retrieved certificate chain via openssl s_client")
-        except (OSError, ConnectionRefusedError, TimeoutError) as e:
+            if certificate_chain:
+                logger.log(verbose_level, "Successfully retrieved certificate chain via openssl s_client")
+        except Exception as e:
             logger.debug(f"openssl s_client command failed: {str(e)}")
             logger.warning(f"Failed to retrieve certificate chain for {dest_ip}:{dest_port} (SNI: {req_hostname})")
             certificate_chain = None
-    
-    # Check if we've exceeded our maximum time
-    if time.time() - start_time >= max_time:
-        logger.warning(f"Certificate retrieval timed out for {dest_ip}:{dest_port}")
-        return None
     
     # Process the certificate chain if we got one
     if certificate_chain:
@@ -464,12 +463,16 @@ def get_server_cert_fullchain(dest_ip, dest_port, req_hostname):
             for cert in certificate_chain:
                 pem_file = cert.to_cryptography().public_bytes(serialization.Encoding.PEM)
                 fullchain.append(pem_file)
-            logger.log(verbose_level, f"Returning certificate chain with {len(fullchain)} certificates")
-            return fullchain
+            
+            if fullchain:
+                logger.log(verbose_level, f"Returning certificate chain with {len(fullchain)} certificates")
+                return fullchain
+            else:
+                logger.warning("Certificate chain was empty after processing")
         except Exception as e:
             logger.warning(f"Error processing certificate chain: {str(e)}")
     
-    # If we can't get a certificate, generate a fake one to allow testing to continue
+    # If we can't get a certificate, log and return None
     logger.log(verbose_level, "No certificate chain found, will generate a self-signed certificate")
     return None
 
