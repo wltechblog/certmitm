@@ -7,6 +7,7 @@ import _thread
 import tempfile, json
 import logging, threading
 import resource
+import selectors
 
 import certmitm.util
 import certmitm.certtest
@@ -125,19 +126,43 @@ def threaded_connection_handler(downstream_socket, listen_port):
             while count < 5:
                 count += 1
                 logger.debug(f"count {count}")
-                # Lets see if the client or the server wants to talk to us
-                if mitm_connection.upstream_socket:
-                    ready = select.select([mitm_connection.downstream_socket, mitm_connection.upstream_socket], [], [], 1)
-                else:
-                    if mitm_connection.downstream_tls:
-                        # Only do one party mitm if we're trying to intercept TLS
-                        logger.debug("Connecting only to the client and not upstream")
-                        ready = select.select([mitm_connection.downstream_socket], [], [], 1)
-                    else:
+                
+                # Create a selector for this iteration
+                sel = selectors.DefaultSelector()
+                
+                # Register the sockets with the selector
+                try:
+                    # Always register the downstream socket
+                    sel.register(mitm_connection.downstream_socket, selectors.EVENT_READ, "client")
+                    
+                    # Register the upstream socket if it exists
+                    if mitm_connection.upstream_socket:
+                        sel.register(mitm_connection.upstream_socket, selectors.EVENT_READ, "server")
+                    elif not mitm_connection.downstream_tls:
+                        # If we don't have an upstream socket and we're not doing TLS interception,
+                        # there's nothing we can do
                         logger.debug("Could not connect to upstream on TCP mitm")
                         return
-
-                for ready_socket in ready[0]:
+                    
+                    # Wait for activity on any of the sockets (1 second timeout)
+                    ready_events = sel.select(timeout=1)
+                    
+                    # If no events are ready, continue to the next iteration
+                    if not ready_events:
+                        continue
+                    
+                except (ValueError, OSError) as e:
+                    # Handle any selector errors
+                    logger.error(f"Selector error: {e}")
+                    # Close the selector to free resources
+                    sel.close()
+                    # If we can't use the selector, we can't continue
+                    return
+                
+                # Process the ready events
+                for key, _ in ready_events:
+                    ready_socket = key.fileobj
+                    socket_type = key.data  # "client" or "server"
                     logger.debug(ready_socket)
                     if ready_socket == mitm_connection.downstream_socket:
                         # Lets read data from the client
@@ -272,15 +297,24 @@ def threaded_connection_handler(downstream_socket, listen_port):
                         logger.debug(f"sending to client: {from_server}")
                     else:
                         # We should never arrive here
-                        logger.exception(f"Select returned unknown connection")
+                        logger.exception(f"Selector returned unknown connection")
+                
+                # Always close the selector at the end of each iteration to free resources
+                sel.close()
+                
+                # If we processed data, break the loop
+                if ready_events:
+                    break
                 else:
                     continue
-                break
             else:
                 logger.debug("mitm timeout")
-        except (ConnectionResetError, ssl.SSLEOFError, TimeoutError):
-            # We might get this depending on the TLS implementation
-            if mitm_connection.downstream_tls and not insecure_data:
+        except (ConnectionResetError, ssl.SSLEOFError, TimeoutError, ValueError, OSError) as e:
+            # We might get this depending on the TLS implementation or socket issues
+            if isinstance(e, ValueError) and "filedescriptor out of range" in str(e):
+                logger.error(f"Socket descriptor error: {e}")
+                logger.error("This can happen with very high socket numbers. Using selectors module to handle this.")
+            elif mitm_connection.downstream_tls and not insecure_data:
                 logger.info(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = Nothing received, someone closed connection")
         except Exception as e:
             # Something unexpected happened
