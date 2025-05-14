@@ -41,6 +41,16 @@ def generate_test_context(original_cert_chain_pem, hostname, working_dir, logger
     
     if is_special_domain:
         logger.info(f"Testing special domain: {hostname}")
+        
+        # Check if we have a real certificate for this domain in real_certs
+        has_real_cert = False
+        if os.path.isdir("real_certs"):
+            real_certs = list(filter(None, [file if "_cert.pem" in file else None for file in os.listdir("real_certs")]))
+            has_real_cert = any(cert for cert in real_certs if "brokedown" in cert)
+        
+        if not has_real_cert:
+            logger.warning(f"No real certificate found for special domain {hostname}")
+            logger.info(f"Will generate optimized test certificates for {hostname}")
     
     # If we don't have a certificate chain, generate one
     if not original_cert_chain_pem:
@@ -87,6 +97,12 @@ def generate_test_context(original_cert_chain_pem, hostname, working_dir, logger
             # Special handling for brokedown.net
             special_domains = ["brokedown.net"]
             is_special_domain = hostname in special_domains
+            
+            # If this is brokedown.net but we don't have the real cert, log a warning
+            if is_special_domain and not any(cert for cert in real_certs if "brokedown" in cert):
+                logger.warning(f"Special domain {hostname} detected but no matching certificate found in real_certs directory")
+                logger.info(f"Will use generated certificates for {hostname} instead")
+                # Continue with normal certificate generation
             
             # Process real certificates
             real_cert_ctx_list = {}

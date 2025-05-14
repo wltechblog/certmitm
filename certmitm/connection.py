@@ -370,8 +370,25 @@ class mitm_connection(object):
 
     def set_upstream(self, ip, port):
         self.logger.debug(f"Connecting to TCP upstream {ip}:{port}")
+        
+        # Close any existing socket first to prevent resource leaks
+        if hasattr(self, 'upstream_socket') and self.upstream_socket:
+            try:
+                self.upstream_socket.close()
+            except:
+                pass
+            self.upstream_socket = None
+            
+        # Special handling for brokedown.net
+        is_special_domain = False
+        if hasattr(self, 'connection') and hasattr(self.connection, 'upstream_name'):
+            is_special_domain = self.connection.upstream_name == "brokedown.net"
+            if is_special_domain:
+                self.logger.info(f"Using special handling for connection to {ip}:{port} (brokedown.net)")
+        
+        # Create a new socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(10)
+        sock.settimeout(15)  # Increased timeout for better reliability
         
         # Set TCP keepalive to detect dead connections
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
@@ -384,12 +401,16 @@ class mitm_connection(object):
         
         try:
             # Connect with retry
-            max_retries = 3
+            max_retries = 5  # Increased retries for better reliability
             retry_count = 0
             last_error = None
             
             while retry_count < max_retries:
                 try:
+                    # For special domains, use a longer timeout
+                    if is_special_domain:
+                        sock.settimeout(20)
+                    
                     sock.connect((ip, port))
                     self.upstream_socket = sock
                     self.upstream_tls = False
@@ -400,19 +421,39 @@ class mitm_connection(object):
                     last_error = e
                     self.logger.debug(f"Connection attempt {retry_count} failed: {e}")
                     if retry_count < max_retries:
-                        time.sleep(0.5)  # Wait before retrying
+                        # Exponential backoff for retries
+                        wait_time = 0.5 * (2 ** (retry_count - 1))
+                        self.logger.debug(f"Waiting {wait_time:.2f}s before retry")
+                        time.sleep(wait_time)
                 except OSError as e:
-                    # Don't retry on other OS errors
-                    last_error = e
-                    break
+                    # Some OS errors might be temporary, so retry a few times
+                    if e.errno in [9, 104, 110, 111]:  # Bad file descriptor, Connection reset, Connection timed out, Connection refused
+                        retry_count += 1
+                        last_error = e
+                        self.logger.debug(f"OS error on connection attempt {retry_count}: {e}")
+                        if retry_count < max_retries:
+                            wait_time = 0.5 * (2 ** (retry_count - 1))
+                            self.logger.debug(f"Waiting {wait_time:.2f}s before retry")
+                            time.sleep(wait_time)
+                    else:
+                        # Don't retry on other OS errors
+                        last_error = e
+                        self.logger.error(f"Non-recoverable OS error: {e}")
+                        break
             
             # If we get here, all retries failed
             self.logger.warning(f"Upstream connection to {ip}:{port} failed after {retry_count} attempts: {last_error}")
-            sock.close()  # Make sure to close the socket on error
+            try:
+                sock.close()  # Make sure to close the socket on error
+            except:
+                pass
             self.upstream_socket = None
         except Exception as e:
             self.logger.error(f"Unexpected error connecting to upstream {ip}:{port}: {e}")
-            sock.close()
+            try:
+                sock.close()
+            except:
+                pass
             self.upstream_socket = None
 
     def wrap_downstream(self, context):
@@ -430,6 +471,25 @@ class mitm_connection(object):
             self.logger.error("Cannot wrap upstream with TLS: No upstream socket available")
             return False
             
+        # Check if socket is already closed
+        try:
+            self.upstream_socket.getpeername()
+        except OSError:
+            self.logger.warning("Socket appears to be closed, reconnecting...")
+            # Get connection details from the connection object
+            if hasattr(self, 'connection'):
+                try:
+                    self.set_upstream(self.connection.upstream_ip, self.connection.upstream_port)
+                    if not self.upstream_socket:
+                        self.logger.error("Failed to reconnect upstream socket")
+                        return False
+                except Exception as e:
+                    self.logger.error(f"Failed to reconnect: {e}")
+                    return False
+            else:
+                self.logger.error("Cannot reconnect: No connection information available")
+                return False
+            
         try:
             # Create a client context with appropriate settings - completely unverified
             self.upstream_context = certmitm.util.create_client_context()
@@ -437,8 +497,16 @@ class mitm_connection(object):
             # Log that we're connecting without certificate validation
             self.logger.debug(f"Connecting to upstream server without certificate validation")
             
+            # Special handling for brokedown.net
+            is_special_domain = hostname == "brokedown.net"
+            if is_special_domain:
+                self.logger.info(f"Using special handling for {hostname}")
+            
             # Wrap the socket with TLS - using SNI but not validating the certificate
             try:
+                # Set a reasonable timeout before wrapping
+                self.upstream_socket.settimeout(15)
+                
                 self.upstream_socket = self.upstream_context.wrap_socket(
                     self.upstream_socket, 
                     server_hostname=hostname,  # Send SNI but don't validate against it
@@ -447,18 +515,41 @@ class mitm_connection(object):
             except ssl.SSLEOFError as eof_error:
                 # Handle unexpected EOF during handshake
                 self.logger.warning(f"SSL EOF error during handshake: {eof_error}")
+                
+                # Reconnect the socket before trying again
+                if hasattr(self, 'connection'):
+                    try:
+                        self.set_upstream(self.connection.upstream_ip, self.connection.upstream_port)
+                        if not self.upstream_socket:
+                            self.logger.error("Failed to reconnect upstream socket after EOF")
+                            return False
+                    except Exception as e:
+                        self.logger.error(f"Failed to reconnect after EOF: {e}")
+                        return False
+                
                 # Try again with do_handshake_on_connect=False and manual handshake
                 self.upstream_socket = self.upstream_context.wrap_socket(
                     self.upstream_socket, 
                     server_hostname=hostname,
                     do_handshake_on_connect=False
                 )
+                
                 # Perform handshake with a timeout
-                self.upstream_socket.settimeout(5)
-                self.upstream_socket.do_handshake()
+                self.upstream_socket.settimeout(15)
+                try:
+                    self.upstream_socket.do_handshake()
+                except Exception as handshake_error:
+                    self.logger.error(f"Handshake failed: {handshake_error}")
+                    if self.upstream_socket:
+                        try:
+                            self.upstream_socket.close()
+                        except:
+                            pass
+                        self.upstream_socket = None
+                    return False
             
             # Set a timeout for TLS operations
-            self.upstream_socket.settimeout(10)
+            self.upstream_socket.settimeout(15)
             
             # Mark as TLS-wrapped
             self.upstream_tls = True
@@ -476,6 +567,18 @@ class mitm_connection(object):
             # Try one more time with a completely unverified context
             try:
                 self.logger.debug("Retrying with completely unverified context")
+                
+                # Reconnect the socket before trying again
+                if hasattr(self, 'connection'):
+                    try:
+                        self.set_upstream(self.connection.upstream_ip, self.connection.upstream_port)
+                        if not self.upstream_socket:
+                            self.logger.error("Failed to reconnect upstream socket before retry")
+                            return False
+                    except Exception as e:
+                        self.logger.error(f"Failed to reconnect before retry: {e}")
+                        return False
+                
                 # Create a raw context with no verification at all
                 raw_context = ssl.SSLContext(ssl.PROTOCOL_TLS)
                 raw_context.check_hostname = False
@@ -483,6 +586,7 @@ class mitm_connection(object):
                 raw_context.set_ciphers('ALL')
                 
                 # Wrap the socket
+                self.upstream_socket.settimeout(15)
                 self.upstream_socket = raw_context.wrap_socket(
                     self.upstream_socket,
                     server_hostname=hostname,
@@ -490,7 +594,7 @@ class mitm_connection(object):
                 )
                 
                 # Set a timeout for TLS operations
-                self.upstream_socket.settimeout(10)
+                self.upstream_socket.settimeout(15)
                 
                 # Mark as TLS-wrapped
                 self.upstream_tls = True
