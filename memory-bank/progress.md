@@ -54,6 +54,14 @@ The tool is fully functional and has been successfully used to discover numerous
 - Limited documentation for advanced usage scenarios
 
 ## Recent Fixes
+- Improved certificate handling with better error recovery
+  - Added robust handling of missing real certificates
+  - Implemented fallback mechanisms when certificate generation fails
+  - Enhanced error reporting for certificate operations
+  - Added better logging of certificate chain retrieval
+  - Improved handling of certificate processing errors
+  - Created fallback self-signed certificate when other tests fail
+
 - Fixed client retry loop issue
   - Added proper error handling when sending data to client
   - Improved validation of data before sending to client

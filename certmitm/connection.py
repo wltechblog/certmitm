@@ -243,10 +243,22 @@ class test_list(object):
                     # Get upstream fullchain from the server
                     self.logger.debug(f"New connection to {self.connection.upstream_str}")
                     try:
+                        # Log that we're attempting to get the certificate chain
+                        self.logger.info(f"Retrieving certificate chain for {self.connection.upstream_str}")
+                        
+                        # Get the certificate chain
                         self.upstream_cert_fullchain = certmitm.util.get_server_cert_fullchain(self.connection.upstream_ip, self.connection.upstream_port, self.connection.upstream_sni)
-                        self.logger.debug(f"{self.connection.upstream_str} fullchain: '{self.upstream_cert_fullchain}'")
+                        
+                        # Log success or failure
+                        if self.upstream_cert_fullchain:
+                            self.logger.info(f"Successfully retrieved certificate chain with {len(self.upstream_cert_fullchain)} certificates")
+                            self.logger.debug(f"{self.connection.upstream_str} fullchain: '{self.upstream_cert_fullchain}'")
+                        else:
+                            self.logger.warning(f"No certificate chain retrieved for {self.connection.upstream_str}")
+                            self.upstream_cert_fullchain = None
                     except Exception as e:
                         self.logger.warning(f"Error getting certificate chain: {str(e)}")
+                        self.logger.info("Will continue with self-signed certificate")
                         self.upstream_cert_fullchain = None
                         
                     # Initialize test list
@@ -255,14 +267,53 @@ class test_list(object):
                     # Generate list of tests for the connection
                     # Even if we couldn't get a certificate chain, we'll generate tests with a self-signed cert
                     try:
+                        self.logger.info(f"Generating certificate tests for {self.connection.upstream_str}")
+                        
+                        # Track how many tests we generate
+                        test_count = 0
+                        
+                        # Generate the tests
                         for test in certmitm.certtest.generate_test_context(self.upstream_cert_fullchain, self.connection.upstream_sni or self.connection.upstream_ip, self.working_dir, self.logger):
                             for i in range(int(self.retrytests)):
                                 self.test_list.append(test)
-                        self.logger.debug(f"Generated {len(self.test_list)} tests for {self.connection.upstream_str}")
+                                test_count += 1
+                                
+                        # Log the results
+                        if test_count > 0:
+                            self.logger.info(f"Successfully generated {test_count} tests for {self.connection.upstream_str}")
+                            self.logger.debug(f"Generated {len(self.test_list)} tests for {self.connection.upstream_str}")
+                        else:
+                            self.logger.warning(f"No tests were generated for {self.connection.upstream_str}")
                     except Exception as e:
                         self.logger.error(f"Failed to generate tests: {str(e)}")
+                        self.logger.error("This may be due to certificate processing issues")
                         # Make sure we have an empty list at minimum
                         self.test_list = []
+                        
+                    # If we still have no tests, generate at least a self-signed test
+                    if not self.test_list:
+                        self.logger.warning("No tests were generated, creating a fallback self-signed test")
+                        try:
+                            # Generate a simple self-signed certificate as fallback
+                            gen_cert, gen_key = certmitm.util.generate_certificate(cn=self.connection.upstream_sni or self.connection.upstream_ip)
+                            certfile, keyfile = certmitm.util.save_certificate_chain([gen_cert], gen_key, self.working_dir, 
+                                                                                   name=f"{self.connection.upstream_sni or self.connection.upstream_ip}_fallback")
+                            
+                            # Create a test with this certificate
+                            ctx = certmitm.util.create_server_context()
+                            ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
+                            
+                            # Create a simple test object
+                            test = certmitm.certtest.certtest("fallback_self_signed", 
+                                                            self.connection.upstream_sni or self.connection.upstream_ip,
+                                                            certfile, keyfile, None)
+                            
+                            # Add it to the test list
+                            self.test_list.append(test)
+                            self.logger.info("Successfully created fallback self-signed test")
+                        except Exception as e:
+                            self.logger.error(f"Failed to create fallback test: {str(e)}")
+                            # We've tried our best, but we still have no tests
 
         # Pop next test if were are not skipping tests
         if not (self.successfull_test_list != [] and self.skiptests):

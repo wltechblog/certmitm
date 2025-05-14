@@ -48,50 +48,78 @@ def generate_test_context(original_cert_chain_pem, hostname, working_dir, logger
     yield certtest(name, hostname, certfile, keyfile, original_cert_chain_pem)
 
     ## Real certs
-    real_certs = list(filter(None, [file if "_cert.pem" in file else None for file in os.listdir("real_certs")]))
-    real_cert_ctx_list = {}
-    for cert in real_certs:
-        basename = cert.split("_cert.pem")[0]
-        certfile="real_certs/{}_cert.pem".format(basename)
-        keyfile="real_certs/{}_key.pem".format(basename)
-        name = f'real_cert_{basename}'
-
-        ## Real cert as is
-        yield certtest(name, hostname, certfile, keyfile, original_cert_chain_pem)
-
-        ## Real cert as CA
-        real_cert_chain_pem = []
-        with open(certfile) as certf:
-            certcontent = certf.read()
-        buffer = ""
-        for i in certcontent.split("\n"):
-            if "CERTIFICATE" in i:
-                if buffer:
-                    buffer = f"-----BEGIN CERTIFICATE-----\n{buffer}-----END CERTIFICATE-----\n"
-                    real_cert_chain_pem.append(buffer)
-                    buffer = ""
+    try:
+        # Check if real_certs directory exists
+        if os.path.isdir("real_certs"):
+            real_certs = list(filter(None, [file if "_cert.pem" in file else None for file in os.listdir("real_certs")]))
+            
+            # Log the number of real certificates found
+            if real_certs:
+                logger.info(f"Found {len(real_certs)} real certificates to use for testing")
             else:
-                buffer += f"{i}\n"
+                logger.warning("No real certificates found in real_certs directory")
+                
+            real_cert_ctx_list = {}
+            for cert in real_certs:
+                try:
+                    basename = cert.split("_cert.pem")[0]
+                    certfile="real_certs/{}_cert.pem".format(basename)
+                    keyfile="real_certs/{}_key.pem".format(basename)
+                    
+                    # Check if both cert and key files exist
+                    if not os.path.isfile(certfile) or not os.path.isfile(keyfile):
+                        logger.warning(f"Missing certificate or key file for {basename}")
+                        continue
+                        
+                    name = f'real_cert_{basename}'
+                    
+                    # Log that we're using this certificate
+                    logger.info(f"Using real certificate: {basename}")
 
-        real_cert_chain = []
-        for real_cert_pem in real_cert_chain_pem:
-            cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, real_cert_pem)
-            real_cert_chain.append(cert)
+                    ## Real cert as is
+                    yield certtest(name, hostname, certfile, keyfile, original_cert_chain_pem)
 
-        with open(keyfile) as keyf:
-            real_cert_chain_key = OpenSSL.crypto.load_privatekey(OpenSSL.crypto.FILETYPE_PEM, keyf.read())
+                    ## Real cert as CA
+                    real_cert_chain_pem = []
+                    with open(certfile) as certf:
+                        certcontent = certf.read()
+                    buffer = ""
+                    for i in certcontent.split("\n"):
+                        if "CERTIFICATE" in i:
+                            if buffer:
+                                buffer = f"-----BEGIN CERTIFICATE-----\n{buffer}-----END CERTIFICATE-----\n"
+                                real_cert_chain_pem.append(buffer)
+                                buffer = ""
+                        else:
+                            buffer += f"{i}\n"
 
-        orig_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, original_cert_chain_pem[0])
+                    real_cert_chain = []
+                    for real_cert_pem in real_cert_chain_pem:
+                        cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, real_cert_pem)
+                        real_cert_chain.append(cert)
 
-        tmp_cert_chain = []
-        tmp_cert_chain.append(orig_cert)
-        tmp_cert_chain.extend(real_cert_chain)
+                    with open(keyfile) as keyf:
+                        real_cert_chain_key = OpenSSL.crypto.load_privatekey(OpenSSL.crypto.FILETYPE_PEM, keyf.read())
 
-        cert, key = certmitm.util.sign_certificate(tmp_cert_chain[0], key=None, issuer_cert=tmp_cert_chain[1], issuer_key=real_cert_chain_key)
-        tmp_cert_chain[0] = cert
+                    orig_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, original_cert_chain_pem[0])
 
-        name = f"real_cert_CA_{basename}"
+                    tmp_cert_chain = []
+                    tmp_cert_chain.append(orig_cert)
+                    tmp_cert_chain.extend(real_cert_chain)
 
-        certfile, keyfile = certmitm.util.save_certificate_chain(tmp_cert_chain, key, working_dir, name=hostname+"_"+name)
-        yield certtest(name, hostname, certfile, keyfile, original_cert_chain_pem)
+                    cert, key = certmitm.util.sign_certificate(tmp_cert_chain[0], key=None, issuer_cert=tmp_cert_chain[1], issuer_key=real_cert_chain_key)
+                    tmp_cert_chain[0] = cert
+
+                    name = f"real_cert_CA_{basename}"
+
+                    certfile, keyfile = certmitm.util.save_certificate_chain(tmp_cert_chain, key, working_dir, name=hostname+"_"+name)
+                    yield certtest(name, hostname, certfile, keyfile, original_cert_chain_pem)
+                except Exception as e:
+                    logger.warning(f"Error processing real certificate {basename}: {str(e)}")
+                    continue
+        else:
+            logger.warning("real_certs directory not found, skipping real certificate tests")
+    except Exception as e:
+        logger.warning(f"Error processing real certificates: {str(e)}")
+        logger.info("Continuing with self-signed and replaced key tests only")
 

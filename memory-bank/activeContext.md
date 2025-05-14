@@ -4,9 +4,11 @@
 The certmitm tool is a fully functional security testing application for identifying TLS certificate validation vulnerabilities. It has been successfully used to discover and report numerous vulnerabilities in major applications and systems.
 
 ## Recent Changes
+- Improved certificate handling with better error recovery and fallback mechanisms
 - Fixed client retry loop issue by improving error handling and data validation
 - Improved certificate retrieval with better timeout handling
 - Enhanced socket error handling to prevent bad responses
+- Added robust handling of missing real certificates
 - The tool was presented at DEF CON 31 in August 2023
 - Documentation has been updated with usage examples and discovered vulnerabilities
 - The Hall of Fame section tracks publicly disclosed vulnerabilities found with the tool
