@@ -282,18 +282,77 @@ def threaded_connection_handler(downstream_socket, listen_port):
                                     # Log before sending
                                     logger.debug(f"Sending {len(from_client)} bytes to server")
                                     
-                                    # Send the data
-                                    bytes_sent = mitm_connection.upstream_socket.send(from_client)
+                                    # Check if the socket is still connected
+                                    try:
+                                        # Try to get socket state
+                                        socket_state = mitm_connection.upstream_socket.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                                        if socket_state != 0:
+                                            logger.warning(f"Socket error before sending: {socket_state}")
+                                            # Reconnect if needed
+                                            if hasattr(mitm_connection, 'connection') and hasattr(mitm_connection.connection, 'upstream_ip'):
+                                                logger.info(f"Attempting to reconnect to {mitm_connection.connection.upstream_ip}:{mitm_connection.connection.upstream_port}")
+                                                mitm_connection.set_upstream(mitm_connection.connection.upstream_ip, mitm_connection.connection.upstream_port)
+                                                if mitm_connection.connection.upstream_sni:
+                                                    mitm_connection.wrap_upstream(mitm_connection.connection.upstream_sni)
+                                    except:
+                                        # Ignore errors in checking socket state
+                                        pass
+                                    
+                                    # Send the data in chunks to avoid large packet issues
+                                    total_sent = 0
+                                    chunk_size = 4096  # Send in 4KB chunks
+                                    
+                                    while total_sent < len(from_client):
+                                        # Calculate the end of this chunk
+                                        end = min(total_sent + chunk_size, len(from_client))
+                                        chunk = from_client[total_sent:end]
+                                        
+                                        # Send the chunk
+                                        bytes_sent = mitm_connection.upstream_socket.send(chunk)
+                                        
+                                        if bytes_sent == 0:
+                                            # Connection closed
+                                            logger.warning("Connection closed by server while sending data")
+                                            break
+                                            
+                                        # Update total sent
+                                        total_sent += bytes_sent
+                                        
+                                        # Small delay between chunks to avoid overwhelming the server
+                                        if total_sent < len(from_client):
+                                            time.sleep(0.01)
                                     
                                     # Verify all data was sent
-                                    if bytes_sent < len(from_client):
-                                        logger.warning(f"Only sent {bytes_sent} of {len(from_client)} bytes to server")
+                                    if total_sent < len(from_client):
+                                        logger.warning(f"Only sent {total_sent} of {len(from_client)} bytes to server")
                                     else:
-                                        logger.debug(f"Successfully sent {bytes_sent} bytes to server")
+                                        logger.debug(f"Successfully sent all {total_sent} bytes to server")
                                         
-                                except (BrokenPipeError, ConnectionResetError, TimeoutError, ssl.SSLError) as e:
-                                    logger.warning(f"Failed to send data to server: {e}")
+                                except (BrokenPipeError, ConnectionResetError) as e:
+                                    logger.warning(f"Connection error sending data to server: {e}")
+                                    # Try to reconnect
+                                    if hasattr(mitm_connection, 'connection') and hasattr(mitm_connection.connection, 'upstream_ip'):
+                                        try:
+                                            logger.info(f"Attempting to reconnect to {mitm_connection.connection.upstream_ip}:{mitm_connection.connection.upstream_port}")
+                                            mitm_connection.set_upstream(mitm_connection.connection.upstream_ip, mitm_connection.connection.upstream_port)
+                                            if mitm_connection.connection.upstream_sni:
+                                                mitm_connection.wrap_upstream(mitm_connection.connection.upstream_sni)
+                                            # If reconnection successful, try sending again
+                                            if mitm_connection.upstream_socket:
+                                                logger.info("Reconnection successful, retrying data send")
+                                                mitm_connection.upstream_socket.send(from_client)
+                                        except Exception as reconnect_error:
+                                            logger.error(f"Failed to reconnect: {reconnect_error}")
+                                            break
+                                    else:
+                                        # Can't reconnect, break the loop
+                                        break
+                                except (TimeoutError, ssl.SSLError) as e:
+                                    logger.warning(f"Timeout or SSL error sending data to server: {e}")
                                     # Close the connection on error
+                                    break
+                                except Exception as e:
+                                    logger.error(f"Unexpected error sending data to server: {e}")
                                     break
                         count = 0
                     elif ready_socket == mitm_connection.upstream_socket:
@@ -402,18 +461,46 @@ def threaded_connection_handler(downstream_socket, listen_port):
                                 # Log before sending
                                 logger.debug(f"Sending {len(from_server)} bytes to client")
                                 
-                                # Send the data
-                                bytes_sent = mitm_connection.downstream_socket.send(from_server)
+                                # Send the data in chunks to avoid large packet issues
+                                total_sent = 0
+                                chunk_size = 4096  # Send in 4KB chunks
+                                
+                                while total_sent < len(from_server):
+                                    # Calculate the end of this chunk
+                                    end = min(total_sent + chunk_size, len(from_server))
+                                    chunk = from_server[total_sent:end]
+                                    
+                                    # Send the chunk
+                                    bytes_sent = mitm_connection.downstream_socket.send(chunk)
+                                    
+                                    if bytes_sent == 0:
+                                        # Connection closed
+                                        logger.warning("Connection closed by client while sending data")
+                                        break
+                                        
+                                    # Update total sent
+                                    total_sent += bytes_sent
+                                    
+                                    # Small delay between chunks to avoid overwhelming the client
+                                    if total_sent < len(from_server):
+                                        time.sleep(0.01)
                                 
                                 # Verify all data was sent
-                                if bytes_sent < len(from_server):
-                                    logger.warning(f"Only sent {bytes_sent} of {len(from_server)} bytes to client")
+                                if total_sent < len(from_server):
+                                    logger.warning(f"Only sent {total_sent} of {len(from_server)} bytes to client")
                                 else:
-                                    logger.debug(f"Successfully sent {bytes_sent} bytes to client")
+                                    logger.debug(f"Successfully sent all {total_sent} bytes to client")
                                     
-                            except (BrokenPipeError, ConnectionResetError, TimeoutError, ssl.SSLError) as e:
-                                logger.warning(f"Failed to send data to client: {e}")
+                            except (BrokenPipeError, ConnectionResetError) as e:
+                                logger.warning(f"Connection error sending data to client: {e}")
+                                # No need to try reconnecting to the client
+                                break
+                            except (TimeoutError, ssl.SSLError) as e:
+                                logger.warning(f"Timeout or SSL error sending data to client: {e}")
                                 # Close the connection on error
+                                break
+                            except Exception as e:
+                                logger.error(f"Unexpected error sending data to client: {e}")
                                 break
                     else:
                         # We should never arrive here

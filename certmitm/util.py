@@ -95,18 +95,59 @@ class LogColorFormatter(logging.Formatter):
 
 
 def create_client_context():
+    """
+    Create a client SSL context with appropriate settings for connecting to upstream servers.
+    This context is intentionally permissive to allow connecting to servers with invalid certificates.
+    """
+    # Create a default context for client connections
     upstream_context = ssl.create_default_context()
+    
+    # Set to use all available ciphers for maximum compatibility
     upstream_context.set_ciphers('ALL')
+    
+    # Disable hostname verification
     upstream_context.check_hostname = False
+    
+    # Don't verify certificates
     upstream_context.verify_mode = ssl.CERT_NONE
-    upstream_context.verify = False
+    
+    # Support all TLS versions
+    upstream_context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+    upstream_context.maximum_version = ssl.TLSVersion.MAXIMUM_SUPPORTED
+    
+    # Set additional options for compatibility
+    upstream_context.options &= ~ssl.OP_NO_SSLv3
+    upstream_context.options &= ~ssl.OP_NO_TLSv1
+    upstream_context.options &= ~ssl.OP_NO_TLSv1_1
+    
     return upstream_context
 
 def create_server_context():
+    """
+    Create a server SSL context with appropriate settings for serving TLS to clients.
+    This context is configured to support a wide range of clients.
+    """
+    # Create a default context for server connections
     ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    
+    # Set to use all available ciphers for maximum compatibility
     ctx.set_ciphers('ALL')
+    
+    # Don't verify client certificates
     ctx.verify_mode = ssl.CERT_NONE
+    
+    # Support all TLS versions
     ctx.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+    ctx.maximum_version = ssl.TLSVersion.MAXIMUM_SUPPORTED
+    
+    # Set additional options for compatibility
+    ctx.options &= ~ssl.OP_NO_SSLv3
+    ctx.options &= ~ssl.OP_NO_TLSv1
+    ctx.options &= ~ssl.OP_NO_TLSv1_1
+    
+    # Enable session tickets for better performance
+    ctx.options |= ssl.OP_NO_TICKET
+    
     return ctx
 
 # Deletes a specific extension from a cert

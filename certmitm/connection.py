@@ -368,17 +368,50 @@ class mitm_connection(object):
         self.downstream_tls_buf = b""
 
     def set_upstream(self, ip, port):
-        self.logger.debug(f"connecting to TCP upstream")
+        self.logger.debug(f"Connecting to TCP upstream {ip}:{port}")
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(10)
+        
+        # Set TCP keepalive to detect dead connections
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        
+        # Set TCP_NODELAY to disable Nagle's algorithm
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        
+        # Set reuse address to avoid "address already in use" errors
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
         try:
-            sock.connect((ip, port))
-            self.upstream_socket = sock
-            self.upstream_tls = False
-            self.logger.debug(f"connected to TCP upstream")
-        except (ConnectionRefusedError, TimeoutError, OSError) as e:
-            self.logger.debug(f"Upstream connection failed with {e}")
+            # Connect with retry
+            max_retries = 3
+            retry_count = 0
+            last_error = None
+            
+            while retry_count < max_retries:
+                try:
+                    sock.connect((ip, port))
+                    self.upstream_socket = sock
+                    self.upstream_tls = False
+                    self.logger.debug(f"Successfully connected to TCP upstream {ip}:{port}")
+                    return
+                except (ConnectionRefusedError, TimeoutError) as e:
+                    retry_count += 1
+                    last_error = e
+                    self.logger.debug(f"Connection attempt {retry_count} failed: {e}")
+                    if retry_count < max_retries:
+                        time.sleep(0.5)  # Wait before retrying
+                except OSError as e:
+                    # Don't retry on other OS errors
+                    last_error = e
+                    break
+            
+            # If we get here, all retries failed
+            self.logger.warning(f"Upstream connection to {ip}:{port} failed after {retry_count} attempts: {last_error}")
             sock.close()  # Make sure to close the socket on error
+            self.upstream_socket = None
+        except Exception as e:
+            self.logger.error(f"Unexpected error connecting to upstream {ip}:{port}: {e}")
+            sock.close()
             self.upstream_socket = None
 
     def wrap_downstream(self, context):
@@ -389,9 +422,49 @@ class mitm_connection(object):
         self.logger.debug(f"Wrapped downstream with TLS")
 
     def wrap_upstream(self, hostname):
-        self.logger.debug(f"Wrapping upstream with TLS")
-        self.upstream_context = certmitm.util.create_client_context()
-        self.upstream_socket = self.upstream_context.wrap_socket(self.upstream_socket, server_hostname=hostname)
-        self.upstream_socket.settimeout(10)
-        self.upstream_tls = True
-        self.logger.debug(f"Wrapped upstream with TLS")
+        self.logger.debug(f"Wrapping upstream with TLS (SNI: {hostname})")
+        
+        # Make sure we have a valid upstream socket
+        if not self.upstream_socket:
+            self.logger.error("Cannot wrap upstream with TLS: No upstream socket available")
+            return False
+            
+        try:
+            # Create a client context with appropriate settings
+            self.upstream_context = certmitm.util.create_client_context()
+            
+            # Wrap the socket with TLS
+            self.upstream_socket = self.upstream_context.wrap_socket(
+                self.upstream_socket, 
+                server_hostname=hostname,
+                do_handshake_on_connect=True
+            )
+            
+            # Set a timeout for TLS operations
+            self.upstream_socket.settimeout(10)
+            
+            # Mark as TLS-wrapped
+            self.upstream_tls = True
+            
+            self.logger.debug(f"Successfully wrapped upstream with TLS (SNI: {hostname})")
+            return True
+        except ssl.SSLError as e:
+            self.logger.error(f"SSL error wrapping upstream with TLS: {e}")
+            # Close the socket on error
+            if self.upstream_socket:
+                try:
+                    self.upstream_socket.close()
+                except:
+                    pass
+                self.upstream_socket = None
+            return False
+        except Exception as e:
+            self.logger.error(f"Error wrapping upstream with TLS: {e}")
+            # Close the socket on error
+            if self.upstream_socket:
+                try:
+                    self.upstream_socket.close()
+                except:
+                    pass
+                self.upstream_socket = None
+            return False

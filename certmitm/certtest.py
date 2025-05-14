@@ -21,10 +21,35 @@ class certtest(object):
         return f"Name: {self.name}, hostname: {self.hostname}, cert: {self.certfile} + {self.keyfile}"
 
 def generate_test_context(original_cert_chain_pem, hostname, working_dir, logger):
+    """
+    Generate test certificates for the given hostname.
+    If original_cert_chain_pem is provided, it will be used as a template.
+    Otherwise, a self-signed certificate will be generated.
+    
+    Args:
+        original_cert_chain_pem: The original certificate chain in PEM format
+        hostname: The hostname to generate certificates for
+        working_dir: The working directory to save certificates to
+        logger: The logger to use for logging
+        
+    Returns:
+        A generator that yields certtest objects
+    """
+    # Check if we're testing for a specific domain that we have real certs for
+    special_domains = ["brokedown.net"]
+    is_special_domain = hostname in special_domains
+    
+    if is_special_domain:
+        logger.info(f"Testing special domain: {hostname}")
+    
+    # If we don't have a certificate chain, generate one
     if not original_cert_chain_pem:
         logger.info(f"No cert chain to generate certificates for {hostname}, making up one.")
         gen_cert, gen_key = certmitm.util.generate_certificate(cn=hostname)
         original_cert_chain_pem = [OpenSSL.crypto.dump_certificate(OpenSSL.crypto.FILETYPE_PEM, gen_cert)]
+        
+        # Log that we're using a generated certificate
+        logger.info(f"Using generated certificate for {hostname}")
 
     ## Self-signed
     tmp_cert_chain = []
@@ -59,6 +84,11 @@ def generate_test_context(original_cert_chain_pem, hostname, working_dir, logger
             else:
                 logger.warning("No real certificates found in real_certs directory")
                 
+            # Special handling for brokedown.net
+            special_domains = ["brokedown.net"]
+            is_special_domain = hostname in special_domains
+            
+            # Process real certificates
             real_cert_ctx_list = {}
             for cert in real_certs:
                 try:
@@ -70,55 +100,86 @@ def generate_test_context(original_cert_chain_pem, hostname, working_dir, logger
                     if not os.path.isfile(certfile) or not os.path.isfile(keyfile):
                         logger.warning(f"Missing certificate or key file for {basename}")
                         continue
-                        
-                    name = f'real_cert_{basename}'
                     
-                    # Log that we're using this certificate
-                    logger.info(f"Using real certificate: {basename}")
-
-                    ## Real cert as is
-                    yield certtest(name, hostname, certfile, keyfile, original_cert_chain_pem)
-
-                    ## Real cert as CA
-                    real_cert_chain_pem = []
-                    with open(certfile) as certf:
-                        certcontent = certf.read()
-                    buffer = ""
-                    for i in certcontent.split("\n"):
-                        if "CERTIFICATE" in i:
-                            if buffer:
-                                buffer = f"-----BEGIN CERTIFICATE-----\n{buffer}-----END CERTIFICATE-----\n"
-                                real_cert_chain_pem.append(buffer)
-                                buffer = ""
+                    # For special domains, prioritize using the real certificate
+                    if is_special_domain:
+                        logger.info(f"Using real certificate for special domain {hostname}")
+                        name = f'real_cert_for_{hostname}'
+                        
+                        # Yield the real certificate first for special domains
+                        yield certtest(name, hostname, certfile, keyfile, original_cert_chain_pem)
+                    else:
+                        # Standard processing for non-special domains
+                        name = f'real_cert_{basename}'
+                        logger.info(f"Using real certificate: {basename}")
+                        
+                        # Yield the real certificate as is
+                        yield certtest(name, hostname, certfile, keyfile, original_cert_chain_pem)
+                    
+                    # Process the certificate chain for CA usage
+                    try:
+                        # Read the certificate file
+                        real_cert_chain_pem = []
+                        with open(certfile) as certf:
+                            certcontent = certf.read()
+                        
+                        # Parse the certificate content
+                        buffer = ""
+                        for i in certcontent.split("\n"):
+                            if "CERTIFICATE" in i:
+                                if buffer:
+                                    buffer = f"-----BEGIN CERTIFICATE-----\n{buffer}-----END CERTIFICATE-----\n"
+                                    real_cert_chain_pem.append(buffer)
+                                    buffer = ""
+                            else:
+                                buffer += f"{i}\n"
+                        
+                        # Load the certificates
+                        real_cert_chain = []
+                        for real_cert_pem in real_cert_chain_pem:
+                            cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, real_cert_pem)
+                            real_cert_chain.append(cert)
+                        
+                        # Load the private key
+                        with open(keyfile) as keyf:
+                            real_cert_chain_key = OpenSSL.crypto.load_privatekey(OpenSSL.crypto.FILETYPE_PEM, keyf.read())
+                        
+                        # Load the original certificate
+                        orig_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, original_cert_chain_pem[0])
+                        
+                        # Create a new certificate chain
+                        tmp_cert_chain = []
+                        tmp_cert_chain.append(orig_cert)
+                        tmp_cert_chain.extend(real_cert_chain)
+                        
+                        # Sign the certificate
+                        cert, key = certmitm.util.sign_certificate(tmp_cert_chain[0], key=None, issuer_cert=tmp_cert_chain[1], issuer_key=real_cert_chain_key)
+                        tmp_cert_chain[0] = cert
+                        
+                        # Save the certificate chain
+                        if is_special_domain:
+                            name = f"real_cert_CA_for_{hostname}"
                         else:
-                            buffer += f"{i}\n"
-
-                    real_cert_chain = []
-                    for real_cert_pem in real_cert_chain_pem:
-                        cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, real_cert_pem)
-                        real_cert_chain.append(cert)
-
-                    with open(keyfile) as keyf:
-                        real_cert_chain_key = OpenSSL.crypto.load_privatekey(OpenSSL.crypto.FILETYPE_PEM, keyf.read())
-
-                    orig_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, original_cert_chain_pem[0])
-
-                    tmp_cert_chain = []
-                    tmp_cert_chain.append(orig_cert)
-                    tmp_cert_chain.extend(real_cert_chain)
-
-                    cert, key = certmitm.util.sign_certificate(tmp_cert_chain[0], key=None, issuer_cert=tmp_cert_chain[1], issuer_key=real_cert_chain_key)
-                    tmp_cert_chain[0] = cert
-
-                    name = f"real_cert_CA_{basename}"
-
-                    certfile, keyfile = certmitm.util.save_certificate_chain(tmp_cert_chain, key, working_dir, name=hostname+"_"+name)
-                    yield certtest(name, hostname, certfile, keyfile, original_cert_chain_pem)
+                            name = f"real_cert_CA_{basename}"
+                            
+                        certfile, keyfile = certmitm.util.save_certificate_chain(tmp_cert_chain, key, working_dir, name=hostname+"_"+name)
+                        
+                        # Yield the certificate test
+                        yield certtest(name, hostname, certfile, keyfile, original_cert_chain_pem)
+                    except Exception as e:
+                        logger.warning(f"Error processing certificate chain for {basename}: {str(e)}")
                 except Exception as e:
                     logger.warning(f"Error processing real certificate {basename}: {str(e)}")
                     continue
         else:
-            logger.warning("real_certs directory not found, skipping real certificate tests")
+            # If no real_certs directory, create it
+            try:
+                os.makedirs("real_certs", exist_ok=True)
+                logger.info("Created real_certs directory")
+            except Exception as e:
+                logger.warning(f"Failed to create real_certs directory: {e}")
+            
+            logger.warning("No real certificates found, skipping real certificate tests")
     except Exception as e:
         logger.warning(f"Error processing real certificates: {str(e)}")
         logger.info("Continuing with self-signed and replaced key tests only")
