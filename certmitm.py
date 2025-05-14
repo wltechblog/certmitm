@@ -43,7 +43,7 @@ def handle_args():
     #parser.add_argument('--upstream-proxy', nargs=1, help="Upstream proxy for MITM. For example, BURP (127.0.0.1:8080)", metavar="ADDRESS") #not yet implemented
     return parser.parse_args()
 
-def threaded_connection_handler(downstream_socket):
+def threaded_connection_handler(downstream_socket, listen_port):
     # Set thread name for better logging
     threading.current_thread().name = f"Thread-{threading.get_ident()}"
     
@@ -56,9 +56,23 @@ def threaded_connection_handler(downstream_socket):
 
         # Lets start by initializing a mitm_connection object with the client connection
         mitm_connection = certmitm.connection.mitm_connection(downstream_socket, logger)
-        connection = certmitm.connection.connection(mitm_connection.downstream_socket, logger)
+        connection = certmitm.connection.connection(mitm_connection.downstream_socket, logger, listen_port)
         logger.log(verbose_level, f"Got connection: {connection.to_str()}")
 
+        # Check if this is a connection loop
+        if connection.is_loop:
+            logger.warning(f"Detected connection loop: {connection.to_str()}")
+            logger.warning("This could be caused by incorrect network configuration or routing.")
+            logger.warning("Make sure your iptables rules don't redirect traffic back to the proxy.")
+            
+            # For testing purposes, we can still try to connect to a different port
+            if connection.upstream_port == 10000:
+                logger.log(verbose_level, f"Attempting to connect to test port 10000 instead")
+            else:
+                # In production, we should just close the connection
+                logger.warning("Closing connection to prevent infinite loop")
+                return
+        
         # Lets get a test for the client
         test = connection_tests.get_test(connection)
         if not test:
@@ -282,7 +296,7 @@ def listen_forking(port):
                     # Create a thread for the connection
                     thread = threading.Thread(
                         target=threaded_connection_handler, 
-                        args=(client,),
+                        args=(client, int(port)),
                         daemon=True
                     )
                     thread.start()

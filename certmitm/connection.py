@@ -16,27 +16,56 @@ connection_counter = counter()
 
 class connection(object):
 
-    def __init__(self, client_socket, logger):
+    def __init__(self, client_socket, logger, listen_port=9900):
         self.id = next(connection_counter)
         self.timestamp = time.time()
         self.lock = threading.Lock()
         self.logger = logger
         self.client_socket = client_socket
+        self.listen_port = listen_port
+        
+        # Get client information
         self.client_name = str(client_socket.getpeername())
         self.client_ip = self.client_name.split("'")[1]
         self.client_port = int(self.client_name.split(" ")[1].split(')')[0]) #Dirty I know :)
+        
+        # Get original destination
         self.upstream_ip, self.upstream_port = certmitm.util.sock_to_dest(self.client_socket)
-        if self.upstream_ip == "127.0.0.1" and self.upstream_port == 9900:
-            self.logger.debug(f"Setting debug upstream")
-            self.upstream_port = 10000
+        
+        # Check for connection loops - detect if we're trying to connect to ourselves
+        self.is_loop = False
+        
+        # Check if connecting to our own listen port on any interface
+        if self.upstream_port == self.listen_port:
+            # Check if connecting to localhost
+            if self.upstream_ip == "127.0.0.1" or self.upstream_ip == "::1":
+                self.logger.warning(f"Detected connection loop to localhost:{self.upstream_port}")
+                self.is_loop = True
+                # Redirect to a different port for testing
+                self.upstream_port = 10000
+            
+            # Check if connecting to our own IP
+            else:
+                # Get our own IP addresses
+                own_ips = certmitm.util.get_own_ip_addresses()
+                if self.upstream_ip in own_ips:
+                    self.logger.warning(f"Detected connection loop to {self.upstream_ip}:{self.upstream_port}")
+                    self.is_loop = True
+                    # Redirect to a different port for testing
+                    self.upstream_port = 10000
+        
+        # Try to get SNI from client hello
         try:
             self.upstream_sni = certmitm.util.SNIFromHello(self.client_socket.recv(4096, socket.MSG_PEEK))
         except (TimeoutError, ConnectionResetError):
             self.upstream_sni = None
+            
+        # Set upstream name based on SNI or IP
         if self.upstream_sni:
             self.upstream_name = self.upstream_sni
         else:
             self.upstream_name = self.upstream_ip
+            
         self.upstream_str = f"{self.upstream_ip}:{self.upstream_port}:{self.upstream_sni}"
         self.identifier = str([self.client_ip, self.upstream_name, self.upstream_port])
 

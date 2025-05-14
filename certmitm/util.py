@@ -261,7 +261,32 @@ def sock_to_dest(sock):
     dst = (sock.getsockopt(socket.SOL_IP, 80, 16))
     port, raw_ip = struct.unpack_from("!2xH4s", dst)
     ip = socket.inet_ntop(socket.AF_INET, raw_ip)
-    return  ip, port
+    return ip, port
+
+# Get all IP addresses of this machine
+def get_own_ip_addresses():
+    ips = []
+    try:
+        # Get all network interfaces
+        interfaces = socket.getaddrinfo(socket.gethostname(), None)
+        
+        # Extract IP addresses
+        for interface in interfaces:
+            ip = interface[4][0]
+            if ip not in ips and not ip.startswith('127.'):
+                ips.append(ip)
+                
+        # Always add localhost
+        if '127.0.0.1' not in ips:
+            ips.append('127.0.0.1')
+        if '::1' not in ips:
+            ips.append('::1')
+            
+        return ips
+    except Exception as e:
+        logging.getLogger("log").warning(f"Error getting own IP addresses: {e}")
+        # Return a default set of IPs
+        return ['127.0.0.1', '::1']
 
 # Try to get server certificate with OpenSSL
 def get_cert_chain(dest_ip, dest_port, req_hostname):
