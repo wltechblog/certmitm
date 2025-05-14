@@ -60,6 +60,8 @@ The tool is fully functional and has been successfully used to discover numerous
   - Fixed issue where server bytes were showing as 0 in the summary
   - Improved data capture for comprehensive analysis
   - Maintained all existing logging functionality
+  - Simplified server data handling logic to ensure consistent capture
+  - Moved client data capture outside of conditional blocks
 
 - Fixed connection hanging issue by adding timeouts and better error handling for certificate retrieval
   - Added timeouts to both OpenSSL connection methods
