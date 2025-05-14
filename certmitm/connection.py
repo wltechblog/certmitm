@@ -5,6 +5,7 @@ import threading
 import time
 import os
 import json
+import ssl
 
 def counter():
     i = 0
@@ -437,11 +438,24 @@ class mitm_connection(object):
             self.logger.debug(f"Connecting to upstream server without certificate validation")
             
             # Wrap the socket with TLS - using SNI but not validating the certificate
-            self.upstream_socket = self.upstream_context.wrap_socket(
-                self.upstream_socket, 
-                server_hostname=hostname,  # Send SNI but don't validate against it
-                do_handshake_on_connect=True
-            )
+            try:
+                self.upstream_socket = self.upstream_context.wrap_socket(
+                    self.upstream_socket, 
+                    server_hostname=hostname,  # Send SNI but don't validate against it
+                    do_handshake_on_connect=True
+                )
+            except ssl.SSLEOFError as eof_error:
+                # Handle unexpected EOF during handshake
+                self.logger.warning(f"SSL EOF error during handshake: {eof_error}")
+                # Try again with do_handshake_on_connect=False and manual handshake
+                self.upstream_socket = self.upstream_context.wrap_socket(
+                    self.upstream_socket, 
+                    server_hostname=hostname,
+                    do_handshake_on_connect=False
+                )
+                # Perform handshake with a timeout
+                self.upstream_socket.settimeout(5)
+                self.upstream_socket.do_handshake()
             
             # Set a timeout for TLS operations
             self.upstream_socket.settimeout(10)

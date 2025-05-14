@@ -347,8 +347,37 @@ def threaded_connection_handler(downstream_socket, listen_port):
                                     else:
                                         # Can't reconnect, break the loop
                                         break
-                                except (TimeoutError, ssl.SSLError) as e:
+                                except (TimeoutError, ssl.SSLError, ssl.SSLEOFError) as e:
                                     logger.warning(f"Timeout or SSL error sending data to server: {e}")
+                                    
+                                    # For EOF errors, try to reconnect
+                                    if isinstance(e, ssl.SSLEOFError) or "EOF occurred in violation of protocol" in str(e):
+                                        logger.info("SSL EOF error detected, attempting to reconnect")
+                                        if hasattr(mitm_connection, 'connection') and hasattr(mitm_connection.connection, 'upstream_ip'):
+                                            try:
+                                                # Close the old socket first
+                                                if mitm_connection.upstream_socket:
+                                                    try:
+                                                        mitm_connection.upstream_socket.close()
+                                                    except:
+                                                        pass
+                                                
+                                                # Reconnect
+                                                logger.info(f"Reconnecting to {mitm_connection.connection.upstream_ip}:{mitm_connection.connection.upstream_port}")
+                                                mitm_connection.set_upstream(mitm_connection.connection.upstream_ip, mitm_connection.connection.upstream_port)
+                                                
+                                                # Rewrap with TLS if needed
+                                                if mitm_connection.connection.upstream_sni:
+                                                    mitm_connection.wrap_upstream(mitm_connection.connection.upstream_sni)
+                                                    
+                                                # If reconnection successful, try sending again
+                                                if mitm_connection.upstream_socket:
+                                                    logger.info("Reconnection successful, retrying data send")
+                                                    mitm_connection.upstream_socket.send(from_client)
+                                                    continue
+                                            except Exception as reconnect_error:
+                                                logger.error(f"Failed to reconnect after SSL EOF: {reconnect_error}")
+                                    
                                     # Close the connection on error
                                     break
                                 except Exception as e:
@@ -392,8 +421,31 @@ def threaded_connection_handler(downstream_socket, listen_port):
                             else:
                                 logger.debug("No data received from server")
                                 
-                        except (TimeoutError, ConnectionResetError, BrokenPipeError, ssl.SSLError) as e:
+                        except (TimeoutError, ConnectionResetError, BrokenPipeError, ssl.SSLError, ssl.SSLEOFError) as e:
                             logger.warning(f"Error reading from server: {e}")
+                            
+                            # For EOF errors, try to reconnect
+                            if isinstance(e, ssl.SSLEOFError) or "EOF occurred in violation of protocol" in str(e):
+                                logger.info("SSL EOF error detected while reading, attempting to reconnect")
+                                if hasattr(mitm_connection, 'connection') and hasattr(mitm_connection.connection, 'upstream_ip'):
+                                    try:
+                                        # Close the old socket first
+                                        if mitm_connection.upstream_socket:
+                                            try:
+                                                mitm_connection.upstream_socket.close()
+                                            except:
+                                                pass
+                                        
+                                        # Reconnect
+                                        logger.info(f"Reconnecting to {mitm_connection.connection.upstream_ip}:{mitm_connection.connection.upstream_port}")
+                                        mitm_connection.set_upstream(mitm_connection.connection.upstream_ip, mitm_connection.connection.upstream_port)
+                                        
+                                        # Rewrap with TLS if needed
+                                        if mitm_connection.connection.upstream_sni:
+                                            mitm_connection.wrap_upstream(mitm_connection.connection.upstream_sni)
+                                    except Exception as reconnect_error:
+                                        logger.error(f"Failed to reconnect after SSL EOF while reading: {reconnect_error}")
+                            
                             count = 1
                             from_server = b''
                             
