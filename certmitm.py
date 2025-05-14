@@ -139,7 +139,32 @@ def threaded_connection_handler(downstream_socket, listen_port):
                     if ready_socket == mitm_connection.downstream_socket:
                         # Lets read data from the client
                         try:
+                            # Read the initial chunk
                             from_client = mitm_connection.downstream_socket.recv(4096)
+                            
+                            # If we have data and there might be more
+                            if from_client and len(from_client) == 4096:
+                                # Set socket to non-blocking to read any remaining data
+                                mitm_connection.downstream_socket.setblocking(False)
+                                
+                                # Try to read more data until we get less than 4096 bytes
+                                try:
+                                    while True:
+                                        # Try to read more data
+                                        more_data = mitm_connection.downstream_socket.recv(4096)
+                                        if not more_data:
+                                            break
+                                        from_client += more_data
+                                        if len(more_data) < 4096:
+                                            break
+                                except (BlockingIOError, ssl.SSLWantReadError):
+                                    # No more data available right now
+                                    pass
+                                finally:
+                                    # Set socket back to blocking mode
+                                    mitm_connection.downstream_socket.setblocking(True)
+                                    
+                            logger.debug(f"Read {len(from_client)} bytes from client")
                         except TimeoutError:
                             count = 5
                             break
@@ -170,7 +195,32 @@ def threaded_connection_handler(downstream_socket, listen_port):
                     elif ready_socket == mitm_connection.upstream_socket:
                         # Lets read data from the server
                         try:
+                            # Read the initial chunk
                             from_server = mitm_connection.upstream_socket.recv(4096)
+                            
+                            # If we have data and there might be more
+                            if from_server and len(from_server) == 4096:
+                                # Set socket to non-blocking to read any remaining data
+                                mitm_connection.upstream_socket.setblocking(False)
+                                
+                                # Try to read more data until we get less than 4096 bytes
+                                try:
+                                    while True:
+                                        # Try to read more data
+                                        more_data = mitm_connection.upstream_socket.recv(4096)
+                                        if not more_data:
+                                            break
+                                        from_server += more_data
+                                        if len(more_data) < 4096:
+                                            break
+                                except (BlockingIOError, ssl.SSLWantReadError):
+                                    # No more data available right now
+                                    pass
+                                finally:
+                                    # Set socket back to blocking mode
+                                    mitm_connection.upstream_socket.setblocking(True)
+                                    
+                            logger.debug(f"Read {len(from_server)} bytes from server")
                         except TimeoutError:
                             count = 1
                             from_server = b''
@@ -226,11 +276,18 @@ def threaded_connection_handler(downstream_socket, listen_port):
                         if args.show_data_all:
                             logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = {header}{data_str}")
                         elif args.show_data:
-                            # Truncate but show how much was truncated
-                            truncated_data = data_str[:4096]
-                            if len(data_str) > 4096:
-                                truncated_data += f"\n[...truncated, {len(data_str) - 4096} more bytes...]"
-                            logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = {header}{truncated_data}")
+                            # For console output, we'll still truncate very large data
+                            # but we'll make sure to indicate this clearly
+                            max_console_output = 8192  # Increased from 4096 to 8192
+                            
+                            if len(data_str) > max_console_output:
+                                truncated_data = data_str[:max_console_output]
+                                truncated_data += f"\n[...truncated, {len(data_str) - max_console_output} more bytes...]"
+                                logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = {header}{truncated_data}")
+                                logger.critical(f"Full data saved to file in {connection.client_ip}/{connection.upstream_name}/data/{connection.timestamp}.*")
+                            else:
+                                # Show all data if it's under the limit
+                                logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = {header}{data_str}")
                     except Exception as e:
                         # Fallback to hex representation if decoding fails
                         logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = [Binary data, {len(insecure_data)} bytes]")
