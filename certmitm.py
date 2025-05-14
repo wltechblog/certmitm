@@ -6,6 +6,7 @@ import os
 import _thread
 import tempfile, json
 import logging, threading
+import resource
 
 import certmitm.util
 import certmitm.certtest
@@ -43,27 +44,34 @@ def handle_args():
     return parser.parse_args()
 
 def threaded_connection_handler(downstream_socket):
+    # Set thread name for better logging
+    threading.current_thread().name = f"Thread-{threading.get_ident()}"
+    
+    # Use the custom VERBOSE level if it exists, otherwise fall back to INFO
+    verbose_level = 15 if hasattr(logging, 'VERBOSE') else logging.INFO
+    
+    mitm_connection = None
     try:
         global connection_tests
 
         # Lets start by initializing a mitm_connection object with the client connection
         mitm_connection = certmitm.connection.mitm_connection(downstream_socket, logger)
         connection = certmitm.connection.connection(mitm_connection.downstream_socket, logger)
-        logger.debug(f"got connection: {connection.to_str()}")
+        logger.log(verbose_level, f"Got connection: {connection.to_str()}")
 
         # Lets get a test for the client
         test = connection_tests.get_test(connection)
         if not test:
             # No tests available, lets just do a TCP mitm :(
-            logger.debug(f"Can't mitm {connection.identifier}. Forwarding plain tcp")
+            logger.log(verbose_level, f"Can't mitm {connection.identifier}. Forwarding plain tcp")
             try:
                 mitm_connection.set_upstream(connection.upstream_ip, connection.upstream_port)
             except OSError as e:
-                logger.debug(f"Can't connect to {connection.identifier}")
+                logger.log(verbose_level, f"Can't connect to {connection.identifier}: {e}")
                 return
         else:
             # We have a test to run
-            logger.debug(f"next test is: {test.to_str()}")
+            logger.log(verbose_level, f"Next test is: {test.to_str()}")
             try:
                 # Lets try to wrap the client connection to TLS
                 mitm_connection.wrap_downstream(test.context)
@@ -74,8 +82,10 @@ def threaded_connection_handler(downstream_socket):
             if mitm_connection.upstream_socket:
                 try:
                     mitm_connection.wrap_upstream(connection.upstream_sni)
-                except (ssl.SSLZeroReturnError, TimeoutError):
-                    logger.debug("Cannot wrap upstream socket. Destroying also the TCP socket.")
+                except (ssl.SSLZeroReturnError, TimeoutError) as e:
+                    logger.log(verbose_level, f"Cannot wrap upstream socket: {e}. Destroying also the TCP socket.")
+                    if mitm_connection.upstream_socket:
+                        mitm_connection.upstream_socket.close()
                     mitm_connection.upstream_socket = None
             if not mitm_connection.upstream_socket:
                 logger.info(f"Cannot connect to {connection.upstream_ip}: with TLS, still trying to intercept without mitm.")
@@ -181,58 +191,143 @@ def threaded_connection_handler(downstream_socket):
             # Something unexpected happened
             logger.exception(e)
         finally:
-            logger.debug("finally")
-            # Log insecure data
-            if insecure_data:
-                if args.show_data_all:
-                    logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} intercepted data = '{insecure_data}'")
-                elif args.show_data:
-                    logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} intercepted data = '{insecure_data[:2048]}'")
-            # Log secure connections
-            elif mitm_connection.downstream_tls and not mitm:
-                logger.info(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = Nothing received")
+            logger.debug("Connection handling complete, cleaning up")
+            
+            # Only proceed with logging if we have a valid connection and test
+            if 'connection' in locals() and 'test' in locals() and test:
+                # Log insecure data
+                if insecure_data:
+                    if args.show_data_all:
+                        logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} intercepted data = '{insecure_data}'")
+                    elif args.show_data:
+                        logger.critical(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} intercepted data = '{insecure_data[:2048]}'")
+                # Log secure connections
+                elif mitm_connection and mitm_connection.downstream_tls and not mitm:
+                    logger.info(f"{connection.client_ip}: {connection.upstream_str} for test {test.name} = Nothing received")
 
-            try:
-                # Close TLS gracefully
-                mitm_connection.downstream_socket.unwrap()
-                mitm_connection.upstream_socket.unwrap()
-            except:
-                pass
-            # Close TCP gracefully
-            mitm_connection.downstream_socket.close()
-            if mitm_connection.upstream_socket:
-                mitm_connection.upstream_socket.close()
+            # Make sure we clean up all sockets
+            if mitm_connection:
+                if hasattr(mitm_connection, 'downstream_socket') and mitm_connection.downstream_socket:
+                    try:
+                        # Close TLS gracefully if it's a TLS socket
+                        if hasattr(mitm_connection, 'downstream_tls') and mitm_connection.downstream_tls:
+                            try:
+                                mitm_connection.downstream_socket.unwrap()
+                            except:
+                                pass
+                        # Close TCP socket
+                        mitm_connection.downstream_socket.close()
+                    except:
+                        logger.debug("Error closing downstream socket")
+                
+                if hasattr(mitm_connection, 'upstream_socket') and mitm_connection.upstream_socket:
+                    try:
+                        # Close TLS gracefully if it's a TLS socket
+                        if hasattr(mitm_connection, 'upstream_tls') and mitm_connection.upstream_tls:
+                            try:
+                                mitm_connection.upstream_socket.unwrap()
+                            except:
+                                pass
+                        # Close TCP socket
+                        mitm_connection.upstream_socket.close()
+                    except:
+                        logger.debug("Error closing upstream socket")
             
     except Exception as e:
         # Something really unexpected happened
         logger.exception(e)
 
 def listen_forking(port):
-    listener = socket.socket()
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("0.0.0.0", int(port)))
-    listener.listen(5)
-
-    while True:
-        try:
-            Client, address = listener.accept()
-            Client.settimeout(30)
-            logger.debug("Request from: {}".format(address))
-            _thread.start_new_thread(threaded_connection_handler, (Client, ))
-        except Exception as e:
-            logger.exception("Error in starting thread: {}".format(e))
+    # Try to increase the file descriptor limit
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        # Try to increase to hard limit or 4096, whichever is smaller
+        new_soft = min(hard, 4096)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+        logger.info(f"Increased file descriptor limit from {soft} to {new_soft}")
+    except (ImportError, ValueError, resource.error) as e:
+        logger.warning(f"Could not increase file descriptor limit: {e}")
+    
+    # Use the custom VERBOSE level if it exists, otherwise fall back to INFO
+    verbose_level = 15 if hasattr(logging, 'VERBOSE') else logging.INFO
+    
+    try:
+        listener = socket.socket()
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Set a timeout on the listener socket to periodically check for errors
+        listener.settimeout(60)
+        listener.bind(("0.0.0.0", int(port)))
+        listener.listen(5)
+        
+        logger.info(f"Listening on port {port}")
+        
+        active_threads = []
+        
+        while True:
+            try:
+                # Clean up completed threads
+                active_threads = [t for t in active_threads if t.is_alive()]
+                
+                # Log the number of active threads periodically
+                if len(active_threads) > 0 and len(active_threads) % 10 == 0:
+                    logger.log(verbose_level, f"Currently handling {len(active_threads)} active connections")
+                
+                # Accept new connections
+                try:
+                    client, address = listener.accept()
+                    client.settimeout(30)
+                    logger.log(verbose_level, f"Request from: {address}")
+                    
+                    # Create a thread for the connection
+                    thread = threading.Thread(
+                        target=threaded_connection_handler, 
+                        args=(client,),
+                        daemon=True
+                    )
+                    thread.start()
+                    active_threads.append(thread)
+                except socket.timeout:
+                    # This is just the listener timeout, continue the loop
+                    continue
+                
+            except Exception as e:
+                logger.exception(f"Error handling connection: {e}")
+    except Exception as e:
+        logger.exception(f"Error setting up listener: {e}")
+    finally:
+        if 'listener' in locals():
+            try:
+                listener.close()
+            except:
+                pass
 
 if __name__ == '__main__':
     args = handle_args()
 
     logger = certmitm.util.createLogger("log")
 
+    # Create a custom VERBOSE level between INFO and DEBUG
+    VERBOSE = 15
+    logging.addLevelName(VERBOSE, "VERBOSE")
+    
+    # Add a verbose method to the logger
+    def verbose(self, message, *args, **kwargs):
+        if self.isEnabledFor(VERBOSE):
+            self._log(VERBOSE, message, args, **kwargs)
+    
+    logging.Logger.verbose = verbose
+    
+    # Set the appropriate log level
     if args.debug:
         logger.setLevel(logging.DEBUG)
     elif args.verbose:
-        logger.setLevel(logging.INFO)
+        logger.setLevel(VERBOSE)
     else:
         logger.setLevel(logging.WARNING)
+        
+    # Add the VERBOSE level to the formatter
+    certmitm.util.LogColorFormatter.FORMATS[VERBOSE] = certmitm.util.LogColorFormatter.blue + "VERBOSE - %(message)s" + certmitm.util.LogColorFormatter.reset
 
     if args.workdir:
         working_dir = args.workdir[0]

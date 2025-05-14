@@ -50,26 +50,43 @@ def SNIFromHello(data):
 
 def createLogger(name):
     logger = logging.getLogger(name)
+    # Clear any existing handlers
+    logger.handlers = []
+    
+    # Create console handler
     ch = logging.StreamHandler()
     ch.setLevel(logging.DEBUG)
     ch.setFormatter(LogColorFormatter())
     logger.addHandler(ch)
+    
+    # Set propagate to False to avoid duplicate logs
+    logger.propagate = False
+    
     return logger
 
 class LogColorFormatter(logging.Formatter):
     grey = "\x1b[38;20m"
+    blue = "\x1b[34;20m"
     yellow = "\x1b[33;20m"
     red = "\x1b[31;20m"
     bold_red = "\x1b[31;1m"
     reset = "\x1b[0m"
-    format = "%(levelname)s - %(message)s"
+    
+    # Different formats for different log levels
+    debug_fmt = "%(levelname)s - [%(threadName)s] %(message)s"
+    info_fmt = "%(levelname)s - %(message)s"
+    warning_fmt = "%(levelname)s - %(message)s"
+    error_fmt = "%(levelname)s - %(message)s"
+    critical_fmt = "%(levelname)s - %(message)s"
+    
     FORMATS = {
-        logging.DEBUG: grey + format + reset,
-        logging.INFO: grey + format + reset,
-        logging.WARNING: yellow + format + reset,
-        logging.ERROR: red + format + reset,
-        logging.CRITICAL: bold_red + format + reset
+        logging.DEBUG: grey + debug_fmt + reset,
+        logging.INFO: blue + info_fmt + reset,
+        logging.WARNING: yellow + warning_fmt + reset,
+        logging.ERROR: red + error_fmt + reset,
+        logging.CRITICAL: bold_red + critical_fmt + reset
     }
+    
     def format(self, record):
         log_fmt = self.FORMATS.get(record.levelno)
         formatter = logging.Formatter(log_fmt)
@@ -291,18 +308,21 @@ def get_server_cert_fullchain(dest_ip, dest_port, req_hostname):
     # Create a logger for this function
     logger = logging.getLogger("log")
     
-    logger.debug(f"Attempting to get certificate chain for {dest_ip}:{dest_port} (SNI: {req_hostname})")
+    # Use the custom VERBOSE level if it exists, otherwise fall back to INFO
+    verbose_level = 15 if hasattr(logging, 'VERBOSE') else logging.INFO
+    
+    logger.log(verbose_level, f"Attempting to get certificate chain for {dest_ip}:{dest_port} (SNI: {req_hostname})")
     
     try:
         logger.debug("Trying direct OpenSSL connection...")
         certificate_chain = get_cert_chain(dest_ip, dest_port, req_hostname)
-        logger.debug("Successfully retrieved certificate chain via direct OpenSSL")
+        logger.log(verbose_level, "Successfully retrieved certificate chain via direct OpenSSL")
     except (OpenSSL.SSL.Error, OSError, ConnectionRefusedError, TimeoutError) as e:
         logger.debug(f"Direct OpenSSL connection failed: {str(e)}")
         try:
             logger.debug("Trying openssl s_client command...")
             certificate_chain = get_cert_chain_sclient(dest_ip, dest_port, req_hostname)
-            logger.debug("Successfully retrieved certificate chain via openssl s_client")
+            logger.log(verbose_level, "Successfully retrieved certificate chain via openssl s_client")
         except (OSError, ConnectionRefusedError, TimeoutError) as e:
             logger.debug(f"openssl s_client command failed: {str(e)}")
             logger.warning(f"Failed to retrieve certificate chain for {dest_ip}:{dest_port} (SNI: {req_hostname})")
@@ -312,10 +332,10 @@ def get_server_cert_fullchain(dest_ip, dest_port, req_hostname):
         for cert in certificate_chain:
             pem_file = cert.to_cryptography().public_bytes(serialization.Encoding.PEM)
             fullchain.append(pem_file)
-        logger.debug(f"Returning certificate chain with {len(fullchain)} certificates")
+        logger.log(verbose_level, f"Returning certificate chain with {len(fullchain)} certificates")
         return fullchain
     
     # If we can't get a certificate, generate a fake one to allow testing to continue
-    logger.debug("No certificate chain found, generating a self-signed certificate")
+    logger.log(verbose_level, "No certificate chain found, will generate a self-signed certificate")
     return None
 

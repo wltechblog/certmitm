@@ -189,14 +189,16 @@ class mitm_connection(object):
 
     def set_upstream(self, ip, port):
         self.logger.debug(f"connecting to TCP upstream")
-        self.upstream_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.upstream_socket.settimeout(10)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
         try:
-            self.upstream_socket.connect((ip, port))
+            sock.connect((ip, port))
+            self.upstream_socket = sock
             self.upstream_tls = False
             self.logger.debug(f"connected to TCP upstream")
         except (ConnectionRefusedError, TimeoutError, OSError) as e:
             self.logger.debug(f"Upstream connection failed with {e}")
+            sock.close()  # Make sure to close the socket on error
             self.upstream_socket = None
 
     def wrap_downstream(self, context):
