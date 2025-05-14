@@ -54,6 +54,15 @@ The tool is fully functional and has been successfully used to discover numerous
 - Limited documentation for advanced usage scenarios
 
 ## Recent Fixes
+- Fixed client retry loop issue
+  - Added proper error handling when sending data to client
+  - Improved validation of data before sending to client
+  - Enhanced socket error handling to prevent bad responses
+  - Added better cleanup of resources when errors occur
+  - Fixed connection loop detection to properly close sockets
+  - Improved certificate retrieval with better timeout handling
+  - Added comprehensive error handling for all socket operations
+
 - Fixed server data not being captured in MITM connections
   - Modified code to always store server data when it's available
   - Ensured server data is captured regardless of connection type or MITM status

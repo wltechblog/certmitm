@@ -72,6 +72,12 @@ def threaded_connection_handler(downstream_socket, listen_port):
             else:
                 # In production, we should just close the connection
                 logger.warning("Closing connection to prevent infinite loop")
+                # Make sure to clean up the socket before returning
+                if mitm_connection and mitm_connection.downstream_socket:
+                    try:
+                        mitm_connection.downstream_socket.close()
+                    except:
+                        pass
                 return
         
         # Lets get a test for the client
@@ -259,9 +265,13 @@ def threaded_connection_handler(downstream_socket, listen_port):
                             # If we don't have instant mitm, lets not send anything to server
                             logger.debug("not sending to upstream when not mitm")
                         else:
-                            if mitm_connection.upstream_socket:
-                                mitm_connection.upstream_socket.send(from_client)
-                                logger.debug(f"sending to server: {from_client}")
+                            if mitm_connection.upstream_socket and from_client and len(from_client) > 0:
+                                try:
+                                    logger.debug(f"sending {len(from_client)} bytes to server")
+                                    mitm_connection.upstream_socket.send(from_client)
+                                except (BrokenPipeError, ConnectionResetError) as e:
+                                    logger.warning(f"Failed to send data to server: {e}")
+                                    break
                         count = 0
                     elif ready_socket == mitm_connection.upstream_socket:
                         # Lets read data from the server
@@ -345,8 +355,15 @@ def threaded_connection_handler(downstream_socket, listen_port):
                                 continue
                         else:
                             count = 0
-                        mitm_connection.downstream_socket.send(from_server)
-                        logger.debug(f"sending to client: {from_server}")
+                            
+                        # Only send data to client if we have valid data
+                        if from_server and len(from_server) > 0:
+                            try:
+                                logger.debug(f"sending {len(from_server)} bytes to client")
+                                mitm_connection.downstream_socket.send(from_server)
+                            except (BrokenPipeError, ConnectionResetError) as e:
+                                logger.warning(f"Failed to send data to client: {e}")
+                                break
                     else:
                         # We should never arrive here
                         logger.exception(f"Selector returned unknown connection")
